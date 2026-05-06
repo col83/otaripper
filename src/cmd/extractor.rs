@@ -47,6 +47,7 @@ thread_local! {
 
 pub enum PayloadSource {
     Mapped(Mmap),
+    MappedOffset(Mmap, usize),
     Owned(Vec<u8>),
     Temp(Mmap, NamedTempFile),
 }
@@ -95,6 +96,7 @@ impl Deref for PayloadSource {
     fn deref(&self) -> &Self::Target {
         match self {
             PayloadSource::Mapped(mmap) => mmap,
+            PayloadSource::MappedOffset(mmap, offset) => &mmap[*offset..],
             PayloadSource::Owned(vec) => vec,
             PayloadSource::Temp(mmap, _) => mmap,
         }
@@ -1171,6 +1173,12 @@ impl<'a> Extractor<'a> {
                 .context("File has ZIP magic but is not a valid ZIP archive")?;
 
             if let Ok(mut zipfile) = archive.by_name("payload.bin") {
+                if zipfile.compression() == zip::CompressionMethod::Stored {
+                    let base_offset = zipfile.data_start().ok_or_else(|| anyhow::anyhow!("Failed to determine the starting byte offset of payload.bin inside the ZIP"))?;
+                    let mmap = unsafe { Mmap::map(&file) }.context("failed to mmap zip file")?;
+                    return Ok(PayloadSource::MappedOffset(mmap, base_offset as usize));
+                }
+
                 let payload_size = zipfile.size();
 
                 // LIGHTWEIGHT RAM CHECK: Only refresh memory stats to minimize overhead
