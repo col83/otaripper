@@ -2,9 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v2.2 Note:**
-> This release introduces significant architectural scalability and performance refinement.
-> The monolithic execution logic has been decoupled into specialized modules. Furthermore, memory allocation overhead has been significantly reduced via thread-local buffer pooling, enabling purely alloc-free zero-copy decompression paths.
+> **v2.3 Note:**
+> This release introduces zero-copy Zip memory mapping for standard OTA payloads, completely eliminating redundant I/O bottlenecks. It also integrates native `arbscan` support and a modernized ARM64 BCJ decompression backend.
 
 ---
 
@@ -57,7 +56,15 @@ To improve maintainability and performance isolation, the underlying operation c
 
 ## Memory Management
 
-### Zero-Copy Memory Mapping
+### Zero-Copy Zip Memory Mapping (v2.3)
+
+Prior to v2.3, extracting partitions from a `.zip` file required unpacking the `payload.bin` to a massive temporary file first. 
+
+otaripper now inspects the zip file metadata. If the payload uses the `STORED` compression method (which almost all Android OTA zips do), it safely bypasses the temporary file entirely. Instead, it memory-maps the *entire* `.zip` file directly from the disk and provides the internal parser with a sliced view starting at the precise byte offset of `payload.bin`.
+
+This optimization yields a 2x reduction in overall SSD write cycles per extraction and eliminates startup delays.
+
+### File Memory Mapping
 
 otaripper avoids traditional buffered I/O in favor of memory mapping:
 
@@ -308,7 +315,7 @@ No partial or ambiguous state is ever left behind.
 
 ### Optimization Strategies
 
-1. Memory-mapped I/O
+1. Memory-mapped I/O (Files and Zip Offsets)
 2. Contention-free parallelism
 3. SIMD acceleration
 4. Extent coalescing
