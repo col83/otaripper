@@ -64,7 +64,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-|                         | otaripper v2.2 | payload-dumper-go | payload_dumper (Python) |
+|                         | otaripper v2.3 | payload-dumper-go | payload_dumper (Python) |
 | ----------------------- | -------------- | ----------------- | ----------------------- |
 | Output verification     | ✅ SHA-256      | ❌                | ❌                      |
 | SIMD optimization       | ✅ AVX-512 / AVX2 / SSE2 | ❌        | ❌                      |
@@ -73,7 +73,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 | Auto-cleanup on failure | ✅              | ❌                | ❌                      |
 | Performance statistics  | ✅              | ❌                | ❌                      |
 | Selective extraction    | ✅              | ✅                | ✅                      |
-| Direct ZIP support      | ✅              | ✅                | ❌                      |
+| Direct ZIP Memory Mapping| ✅ (Zero-Copy)  | ❌ (Extracts temp)| ❌                      |
 | Multi-threaded          | ✅              | ✅                | ❌ (single-threaded)    |
 | Cross-platform          | ✅              | ✅                | ⚠️ Requires Python     |
 | Standalone binary       | ✅              | ✅                | ❌                      |
@@ -86,8 +86,10 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **2.2** brings significant architectural scalability and performance refinement by:
+Version **2.3** brings massive I/O savings and execution speedups by:
 
+* **Direct ZIP Memory Mapping**: Bypasses the traditional temp-file extraction step for `STORED` OTA zips, mapping the internal `payload.bin` straight from the disk using a zero-copy offset. Saves gigabytes of SSD writes per extraction.
+* **Modern Decompression Engine**: Upgraded `liblzma` backend safely handles modern Android payloads utilizing the ARM64 BCJ filter (e.g., Xiaomi HyperOS).
 * **Modular Engine Architecture**: Breaking the monolithic extraction logic into specialized `extractor` and `simd` modules.
 * **Thread-Local Buffer Pooling**: Drastically amortizing memory allocations across deep Rayon threadpools.
 * **Zero-Copy Decompression**: Triggering purely alloc-free extraction paths when output blocks map cleanly to continuous extents.
