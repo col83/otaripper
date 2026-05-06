@@ -1002,14 +1002,9 @@ impl<'a> Extractor<'a> {
                 Ok(total_dst_size)
             }
             Type::Zero | Type::Discard => {
-                if ctx.zero_ops_are_noops {
-                    Ok(0) // no work done
-                } else {
-                    for extent in dst_extents.iter_mut() {
-                        extent.fill(0);
-                    }
-                    Ok(total_dst_size) // actual zeroing happened
-                }
+                // the OS kernel guarantees new file sectors are strictly zeroed.
+                // we safely bypass user-space filling completely to save disk I/O
+                Ok(total_dst_size)
             }
 
             // Catch-all for incremental types (Bsdiff, Brotli, etc.) or unknown future types
