@@ -1,5 +1,40 @@
 # Changelog
 
+## **otaripper v2.3.0** (2026-05-07)
+
+### Direct Zip Memory Mapping (Zero-Copy Extraction)
+
+This release introduces a massive performance upgrade for extraction speeds by completely bypassing the initial `payload.bin` extraction step for standard OTA zips.
+
+---
+
+## Performance & Efficiency
+
+* **Direct Memory Mapping for STORED Zips**
+  * Added a new `MappedOffset` variant to `PayloadSource`.
+  * If the OTA `.zip` is uncompressed (`STORED` method, which is standard for almost all OTAs), the tool now memory maps the original `.zip` straight from the disk.
+  * Uses an offset to jump directly to where the payload data starts.
+  * **Instant Start**: Progress bars now show up almost immediately. No more waiting for the pre-unzip lag.
+  * **Disk Health**: Saves gigabytes of redundant SSD writes every time you extract a partition.
+  * **Pure Efficiency**: Bypasses the initial zip extraction overhead completely, resulting in major zero-copy speed boosts.
+* **Graceful Fallback**
+  * If the zip happens to be compressed, it safely falls back to the old RAM/Temp File method to ensure stability and prevent crashes.
+
+---
+
+## UX / CLI Improvements
+
+* **Improved `arbscan` Error Messages**
+  * Added a customized error message when global extraction flags (like `-l`, `--strict`, or `--sanity`) are accidentally used with the `arb`/`arbscan` subcommand.
+  * Clearly explains that the subcommand only accepts the `-n` / `--no-json` flag, preventing user confusion.
+
+---
+
+## Credits
+
+Special thanks to **ArKT-7** for this massive performance win and implementing the direct memory mapping logic.
+
+---
 ## **otaripper v2.2.2** (2026-05-05)
 
 ### Arbscan Integration
