@@ -15,6 +15,8 @@ jobs:
       matrix:
         package: [otaripper, otaripper-bin]
     steps:
+      - uses: actions/checkout@v6
+
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm git openssh binutils sudo base-devel
@@ -75,10 +77,10 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/${{ matrix.package }}.git aur_repo
           cd aur_repo
 
-          # Update PKGBUILD
-          sed -i "s/^pkgver=.*/pkgver=${{ steps.get_data.outputs.version }}/" PKGBUILD
-          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
-          sed -i "s|^sha256sums=.*|sha256sums=('${{ steps.get_data.outputs.sha256 }}')|" PKGBUILD
+          # Update PKGBUILD using template from repo
+          cp ../aur/${{ matrix.package }}/PKGBUILD .
+          sed -i "s/VERSION_PLACEHOLDER/${{ steps.get_data.outputs.version }}/" PKGBUILD
+          sed -i "s/SHA256_PLACEHOLDER/${{ steps.get_data.outputs.sha256 }}/" PKGBUILD
 
           # Generate .SRCINFO
           useradd -m builder
