@@ -21,11 +21,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            outname: otaripper-linux-x86_64
+            outname: linux-x86_64
           - target: x86_64-unknown-linux-musl
-            outname: otaripper-linux-static-x86_64
+            outname: linux-static-x86_64
           - target: aarch64-unknown-linux-gnu
-            outname: otaripper-linux-arm64
+            outname: linux-arm64
 
     steps:
       - uses: actions/checkout@v6
@@ -35,19 +35,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo apt-get install -y musl-tools
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
 
-      - name: Install ARM64 cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Configure Cargo (ARM64)
+      - name: Configure ARM64 toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           mkdir -p .cargo
@@ -63,18 +64,17 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
-        run: |
-          strip target/${{ matrix.target }}/release/${BIN_NAME} || true
-
       - name: Package
         shell: bash
         run: |
+          NAME="${BIN_NAME}-${{ matrix.outname }}"
+
+          strip target/${{ matrix.target }}/release/${BIN_NAME} || true
+
           mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md LICENSE pkg/
-          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
-          sha256sum ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
+          cp target/${{ matrix.target }}/release/${BIN_NAME} README.md LICENSE pkg/
+          tar -czf "$NAME.tar.gz" -C pkg .
+          sha256sum "$NAME.tar.gz" > "$NAME.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -93,9 +93,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            outname: otaripper-windows-msvc-x86_64
+            outname: windows-msvc-x86_64
           - target: x86_64-pc-windows-gnu
-            outname: otaripper-windows-gnu-x86_64
+            outname: windows-gnu-x86_64
 
     steps:
       - uses: actions/checkout@v6
@@ -105,8 +105,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install zip
-        run: choco install zip -y
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -114,11 +114,12 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          NAME="${BIN_NAME}-${{ matrix.outname }}"
+
           mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/
-          cp README.md LICENSE pkg/
-          zip -r ${{ matrix.outname }}.zip pkg
-          sha256sum ${{ matrix.outname }}.zip > ${{ matrix.outname }}.sha256
+          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe README.md LICENSE pkg/
+          7z a "$NAME.zip" ./pkg/*
+          sha256sum "$NAME.zip" > "$NAME.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -136,9 +137,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            outname: otaripper-macos-x86_64
+            outname: macos-x86_64
           - target: aarch64-apple-darwin
-            outname: otaripper-macos-arm64
+            outname: macos-arm64
 
     steps:
       - uses: actions/checkout@v6
@@ -148,20 +149,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
-        run: |
-          strip target/${{ matrix.target }}/release/${BIN_NAME} || true
-
       - name: Package
         run: |
+          NAME="${BIN_NAME}-${{ matrix.outname }}"
+
+          strip target/${{ matrix.target }}/release/${BIN_NAME} || true
+
           mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md LICENSE pkg/
-          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
-          shasum -a 256 ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
+          cp target/${{ matrix.target }}/release/${BIN_NAME} README.md LICENSE pkg/
+          tar -czf "$NAME.tar.gz" -C pkg .
+          shasum -a 256 "$NAME.tar.gz" > "$NAME.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -184,43 +187,38 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
         id: ndk
 
-      - name: Configure Cargo (Android)
+      - name: Build Android
         run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [target.aarch64-linux-android]
-          linker = "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
 
-          [env]
-          CC_aarch64_linux_android="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          AR_aarch64_linux_android="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          EOF
-
-      - name: Build
-        run: cargo build --release --target aarch64-linux-android
-
-      - name: Strip binary
-        run: |
-          "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
-            target/aarch64-linux-android/release/${BIN_NAME} || true
+          cargo build --release --target aarch64-linux-android
 
       - name: Package
         run: |
+          NAME="${BIN_NAME}-android-arm64"
+
+          llvm-strip target/aarch64-linux-android/release/${BIN_NAME} || true
+
           mkdir pkg
-          cp target/aarch64-linux-android/release/${BIN_NAME} pkg/
-          cp README.md LICENSE pkg/
-          zip -j otaripper-android-arm64.zip pkg/*
-          sha256sum otaripper-android-arm64.zip > otaripper-android-arm64.sha256
+          cp target/aarch64-linux-android/release/${BIN_NAME} README.md LICENSE pkg/
+          zip -j "$NAME.zip" pkg/*
+          sha256sum "$NAME.zip" > "$NAME.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: otaripper-android-arm64
+          name: android-arm64
           path: |
             *.zip
             *.sha256
