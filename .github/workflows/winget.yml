@@ -1,0 +1,62 @@
+name: Winget Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  schedule:
+    # Run every Sunday at 00:00 UTC
+    - cron: '0 0 * * 0'
+
+jobs:
+  publish:
+    name: Publish to Winget
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get latest release version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG_NAME="${{ github.event.release.tag_name }}"
+          else
+            # Fetch latest release tag from GitHub API
+            TAG_NAME=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/latest" | \
+              grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          
+          if [ -z "$TAG_NAME" ]; then
+            echo "Error: Could not determine tag name."
+            exit 1
+          fi
+          
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if version already in winget-pkgs
+        id: winget_check
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          echo "Checking winget-pkgs for syedinsaf.otaripper @ $VERSION"
+          
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/s/syedinsaf/otaripper/$VERSION")
+            
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Version $VERSION already exists in winget-pkgs — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $VERSION not found in winget-pkgs — proceeding."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Submit package to Winget
+        if: steps.winget_check.outputs.skip == 'false'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: syedinsaf.otaripper
+          # Use the tag name detected in the first step
+          release-tag: ${{ steps.get_version.outputs.tag_name }}
+          installers-regex: 'windows-msvc-x86_64\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

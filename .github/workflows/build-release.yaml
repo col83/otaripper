@@ -281,23 +281,6 @@ jobs:
           generate_release_notes: true
           files: artifacts/**/*
 
-# =========================
-# Winget Package Submission
-# =========================
-  winget:
-    name: Submit to Winget
-    runs-on: windows-latest
-    needs: release
-    # Only run on full version tags, not draft/prerelease if any
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Submit package to Winget
-        uses: vedantmgoyal2009/winget-releaser@v2
-        with:
-          identifier: syedinsaf.otaripper
-          # Match the Windows MSVC zip artifact created in the previous step
-          installers-regex: 'windows-msvc-x86_64\.zip$'
-          token: ${{ secrets.WINGET_TOKEN }}
 
 # =========================
 # Crates.io Publish
