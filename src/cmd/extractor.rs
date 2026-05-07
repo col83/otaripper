@@ -1302,7 +1302,7 @@ impl<'a> Extractor<'a> {
         let path: PathBuf = partition_dir.as_ref().join(filename);
 
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-        let mut mmap = {
+        let mmap = {
             let mut opts = OpenOptions::new();
             opts.read(true).write(true).create_new(true);
 
@@ -1327,14 +1327,17 @@ impl<'a> Extractor<'a> {
                     let fd = file.as_raw_fd();
                     let ret = libc::posix_fallocate(fd, 0, partition_len as libc::off_t);
                     if ret != 0 {
-                        eprintln!("Warning: posix_fallocate failed (code {}), Extraction continues but may be fragmented", ret);
+                        eprintln!(
+                            "Warning: posix_fallocate failed (code {}), Extraction continues but may be fragmented",
+                            ret
+                        );
                     }
                 }
             }
 
             file.set_len(partition_len)?;
-            
-            let mut mmap_mut = unsafe { MmapMut::map_mut(&file) }
+
+            let mmap_mut = unsafe { MmapMut::map_mut(&file) }
                 .with_context(|| format!("failed to mmap file: {path:?}"))?;
 
             // Linux-only sequential access hint (clean memmap2 API)
