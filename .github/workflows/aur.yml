@@ -63,6 +63,7 @@ jobs:
           
           git config --global user.name "Syed Insaf"
           git config --global user.email "syedinsaf@proton.me"
+          git config --global --add safe.directory '*'
           
           # Use the SSH agent for the clone and push
           export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
