@@ -1316,6 +1316,22 @@ impl<'a> Extractor<'a> {
             let file = opts
                 .open(&path)
                 .with_context(|| format!("unable to open file for writing: {path:?}"))?;
+
+            // Linux-only optimization: Pre-allocate physical disk blocks
+            // this prevents sparse file fragmentation and eliminates filesystem lock
+            // contention when dozens of threads are writing randomly.
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    let fd = file.as_raw_fd();
+                    let ret = libc::posix_fallocate(fd, 0, partition_len as libc::off_t);
+                    if ret != 0 {
+                        eprintln!("Warning: posix_fallocate failed (code {}), Extraction continues but may be fragmented", ret);
+                    }
+                }
+            }
+
             file.set_len(partition_len)?;
             
             let mut mmap_mut = unsafe { MmapMut::map_mut(&file) }
