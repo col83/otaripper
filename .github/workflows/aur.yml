@@ -36,12 +36,8 @@ jobs:
           echo "AUR version: $AUR_VERSION"
           echo "New version: $VERSION-1"
 
-          if [ "$AUR_VERSION" = "$VERSION-1" ]; then
-            echo "AUR already has v$VERSION — skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Temporarily forced to false for testing
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
           if [ "${{ matrix.package }}" = "otaripper-bin" ]; then
             FILENAME="otaripper-${VERSION}-linux-static-x86_64.tar.gz"
