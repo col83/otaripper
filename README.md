@@ -105,7 +105,7 @@ payload-dumper-go    ████         1.0 GB/s
 payload_dumper       ██           0.4 GB/s
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-````
+```
 
 Performance scales with:
 
@@ -237,7 +237,7 @@ and refuses to operate on filesystem roots for safety.
 
 ### Requirements
 
-* **Rust 1.93.0 or newer** (MSRV)
+* **Rust 1.95.0 or newer** (MSRV)
 * Git
 * C compiler (gcc / clang / MSVC) - required by some native dependencies
 
