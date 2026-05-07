@@ -53,32 +53,33 @@ jobs:
         env:
           AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
+          # Use ssh-agent for more reliable key handling
+          eval $(ssh-agent -s)
+          ssh-add - <<< "$AUR_KEY"
+          
           mkdir -p ~/.ssh
-          echo "$AUR_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          # Scan all available host key types to be safe
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
           
           git config --global user.name "Syed Insaf"
           git config --global user.email "syedinsaf@proton.me"
           
+          # Use the SSH agent for the clone and push
           git clone ssh://aur@aur.archlinux.org/${{ matrix.package }}.git aur_repo
           cd aur_repo
           
-          # 1. Update Version
+          # Update PKGBUILD
           sed -i "s/^pkgver=.*/pkgver=${{ steps.get_data.outputs.version }}/" PKGBUILD
           sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
           
-          # 2. Update Source Filename (specific for -bin)
           if [ "${{ matrix.package }}" = "otaripper-bin" ]; then
             sed -i 's/otaripper-.*-linux-.*\.tar\.gz/${{ steps.get_data.outputs.filename }}/' PKGBUILD
           fi
           
-          # 3. Update SHA256 (Robust way: deletes the old block and adds a fresh one)
-          # This handles both single-line and multi-line formats
           sed -i '/^sha256sums=/,/)/d' PKGBUILD
           echo "sha256sums=('${{ steps.get_data.outputs.sha256 }}')" >> PKGBUILD
           
-          # 4. Generate .SRCINFO
+          # Generate .SRCINFO
           useradd -m builder
           chown -R builder:builder .
           sudo -u builder makepkg --printsrcinfo > .SRCINFO
