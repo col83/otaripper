@@ -1303,28 +1303,34 @@ impl<'a> Extractor<'a> {
 
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut mmap = {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(true).create_new(true);
+
+            // windows-only optimization: aggressive kernel readahead
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                opts.custom_flags(0x08000000); // FILE_FLAG_SEQUENTIAL_SCAN
+            }
+
+            let file = opts
                 .open(&path)
                 .with_context(|| format!("unable to open file for writing: {path:?}"))?;
             file.set_len(partition_len)?;
-            unsafe { MmapMut::map_mut(&file) }
-                .with_context(|| format!("failed to mmap file: {path:?}"))?
-        };
-        // Linux-only sequential access hint for mmap writes
-        #[cfg(target_os = "linux")]
-        {
-            use libc::{MADV_SEQUENTIAL, madvise};
-            unsafe {
-                madvise(
-                    mmap.as_mut_ptr() as *mut libc::c_void,
-                    mmap.len(),
-                    MADV_SEQUENTIAL,
-                );
+            
+            let mut mmap_mut = unsafe { MmapMut::map_mut(&file) }
+                .with_context(|| format!("failed to mmap file: {path:?}"))?;
+
+            // Linux-only sequential access hint (clean memmap2 API)
+            #[cfg(target_os = "linux")]
+            {
+                if let Err(e) = mmap_mut.advise(memmap2::Advice::Sequential) {
+                    // We use eprintln for a simple warning that doesn't stop extraction
+                    eprintln!("Warning: Failed to set sequential readahead hint: {}", e);
+                }
             }
-        }
+            mmap_mut
+        };
 
         let partition = Arc::new(mmap);
         Ok((partition, partition_len as usize, path))
