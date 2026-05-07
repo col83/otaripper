@@ -65,6 +65,7 @@ jobs:
           git config --global user.email "syedinsaf@proton.me"
           
           # Use the SSH agent for the clone and push
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
           git clone ssh://aur@aur.archlinux.org/${{ matrix.package }}.git aur_repo
           cd aur_repo
           
