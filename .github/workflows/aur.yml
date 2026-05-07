@@ -19,7 +19,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm git openssh binutils sudo base-devel
 
-      - name: Get version and calculate hash
+      - name: Get version and check AUR
         id: get_data
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
@@ -28,63 +28,63 @@ jobs:
             TAG_NAME=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
           fi
           VERSION="${TAG_NAME#v}"
-          
-          if [ "${{ matrix.package }}" = "otaripper-bin" ]; then
-            # We use the STATIC build for the -bin package for maximum compatibility
-            FILENAME="otaripper-${VERSION}-linux-static-x86_64.tar.gz"
+
+          # Check if AUR already has this version
+          AUR_VERSION=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg=${{ matrix.package }}" | sed -n 's/.*"Version":"\([^"]*\)".*/\1/p')
+          echo "AUR version: $AUR_VERSION"
+          echo "New version: $VERSION-1"
+
+          if [ "$AUR_VERSION" = "$VERSION-1" ]; then
+            echo "AUR already has v$VERSION — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            # Source tarball for the source package
-            FILENAME="${TAG_NAME}.tar.gz"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          
-          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG_NAME}.tar.gz"
+
           if [ "${{ matrix.package }}" = "otaripper-bin" ]; then
-             URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${FILENAME}"
+            FILENAME="otaripper-${VERSION}-linux-static-x86_64.tar.gz"
+            URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${FILENAME}"
+          else
+            FILENAME="${TAG_NAME}.tar.gz"
+            URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG_NAME}.tar.gz"
           fi
 
           curl -L -o release_file "$URL"
           SHA256=$(sha256sum release_file | awk '{ print $1 }')
-          
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
-          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
 
       - name: Update AUR repository
+        if: steps.get_data.outputs.skip != 'true'
         env:
           AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           # Use ssh-agent for more reliable key handling
           eval $(ssh-agent -s)
           ssh-add - <<< "$AUR_KEY"
-          
+
           mkdir -p ~/.ssh
-          # Scan all available host key types to be safe
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-          
+
           git config --global user.name "Syed Insaf"
           git config --global user.email "syedinsaf@proton.me"
           git config --global --add safe.directory '*'
-          
-          # Use the SSH agent for the clone and push
+
           export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
           git clone ssh://aur@aur.archlinux.org/${{ matrix.package }}.git aur_repo
           cd aur_repo
-          
+
           # Update PKGBUILD
           sed -i "s/^pkgver=.*/pkgver=${{ steps.get_data.outputs.version }}/" PKGBUILD
           sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
-          
-          if [ "${{ matrix.package }}" = "otaripper-bin" ]; then
-            sed -i 's/otaripper-.*-linux-.*\.tar\.gz/${{ steps.get_data.outputs.filename }}/' PKGBUILD
-          fi
-          
           sed -i "s|^sha256sums=.*|sha256sums=('${{ steps.get_data.outputs.sha256 }}')|" PKGBUILD
-          
+
           # Generate .SRCINFO
           useradd -m builder
           chown -R builder:builder .
           sudo -u builder makepkg --printsrcinfo > .SRCINFO
-          
+
           # Commit and Push
           git add PKGBUILD .SRCINFO
           if git diff --cached --quiet; then
