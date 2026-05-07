@@ -585,12 +585,7 @@ impl<'a> Extractor<'a> {
             self.handle_critical_error(&cleanup_state, &first_error)?;
         }
 
-        self.print_final_reports(
-            hash_receiver,
-            stats_receiver,
-            total_start,
-            &partition_dir,
-        )?;
+        self.print_final_reports(hash_receiver, stats_receiver, total_start, &partition_dir)?;
 
         if let Ok(mut state) = cleanup_state.lock() {
             state.files.clear();
@@ -633,7 +628,13 @@ impl<'a> Extractor<'a> {
         let (partition_file, partition_len, out_path) =
             self.open_partition_file(update, partition_dir)?;
 
-        cleanup_state.lock().unwrap_or_else(|e| e.into_inner()).files.push(out_path);
+        match cleanup_state.lock() {
+            Ok(mut guard) => guard.files.push(out_path),
+            Err(poisoned) => {
+                eprintln!("warning: cleanup lock poisoned by previous panic");
+                poisoned.into_inner().files.push(out_path);
+            }
+        }
 
         let part_start = if self.cmd.stats {
             Some(Instant::now())
@@ -656,9 +657,32 @@ impl<'a> Extractor<'a> {
         let base_ptr = PartitionPtr(partition_file.as_ptr() as *mut u8);
 
         if ops.len() <= 2 {
-            self.dispatch_serial(ctx, ops, payload, base_ptr, block_size, simd, progress_bar, update, part_index, part_start)?;
+            self.dispatch_serial(
+                ctx,
+                ops,
+                payload,
+                base_ptr,
+                block_size,
+                simd,
+                progress_bar,
+                update,
+                part_index,
+                part_start,
+            )?;
         } else {
-            self.dispatch_parallel(scope, ctx, ops, payload, base_ptr, block_size, simd, progress_bar, update, part_index, part_start);
+            self.dispatch_parallel(
+                scope,
+                ctx,
+                ops,
+                payload,
+                base_ptr,
+                block_size,
+                simd,
+                progress_bar,
+                update,
+                part_index,
+                part_start,
+            );
         }
 
         Ok(false)
@@ -683,7 +707,15 @@ impl<'a> Extractor<'a> {
                 break;
             }
 
-            match self.run_op_raw(op, payload, base_ptr, ctx.partition_len, block_size, &ctx.part_name, simd) {
+            match self.run_op_raw(
+                op,
+                payload,
+                base_ptr,
+                ctx.partition_len,
+                block_size,
+                &ctx.part_name,
+                simd,
+            ) {
                 Ok(bytes) => progress_bar.inc(bytes as u64),
                 Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                     ctx.cancellation_token.store(true, Ordering::Release);
@@ -693,7 +725,9 @@ impl<'a> Extractor<'a> {
                     return Ok(());
                 }
                 Err(_) => {
-                    eprintln!("\nCritical error: An extraction error occurred, and the system additionally failed to acquire a lock to record the details. Aborting...");
+                    eprintln!(
+                        "\nCritical error: An extraction error occurred, and the system additionally failed to acquire a lock to record the details. Aborting..."
+                    );
                     ctx.cancellation_token.store(true, Ordering::Release);
                     return Ok(());
                 }
@@ -766,13 +800,26 @@ impl<'a> Extractor<'a> {
         first_error: &Arc<Mutex<Option<anyhow::Error>>>,
     ) -> Result<()> {
         if let Ok(state) = cleanup_state.lock() {
-            for f in &state.files { let _ = fs::remove_file(f); }
-            if state.dir_is_new { let _ = fs::remove_dir_all(&state.dir); }
+            for f in &state.files {
+                let _ = fs::remove_file(f);
+            }
+            if state.dir_is_new {
+                let _ = fs::remove_dir_all(&state.dir);
+            }
         }
-        if let Some(err) = first_error.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let error = match first_error.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => {
+                eprintln!("warning: error lock poisoned by previous panic");
+                poisoned.into_inner().take()
+            }
+        };
+        if let Some(err) = error {
             eprintln!("\n{}", err);
         }
-        bail!("❌ Extraction failed due to errors (see above). All partial files have been cleaned up.");
+        bail!(
+            "❌ Extraction failed due to errors (see above). All partial files have been cleaned up."
+        );
     }
 
     fn print_final_reports(
@@ -784,28 +831,49 @@ impl<'a> Extractor<'a> {
     ) -> Result<()> {
         if let Some(receiver) = hash_receiver {
             let mut v: Vec<HashRec> = Vec::new();
-            while let Ok(r) = receiver.try_recv() { v.push(r); }
+            while let Ok(r) = receiver.try_recv() {
+                v.push(r);
+            }
             if !v.is_empty() {
                 v.sort_by_key(|r| r.order);
                 println!("Partition hashes (SHA-256):");
-                for r in v { println!("{}: sha256={}", r.name, r.hex); }
+                for r in v {
+                    println!("{}: sha256={}", r.name, r.hex);
+                }
             }
         }
 
         if let Some(receiver) = stats_receiver {
             let mut v: Vec<Stat> = Vec::new();
-            while let Ok(s) = receiver.try_recv() { v.push(s); }
+            while let Ok(s) = receiver.try_recv() {
+                v.push(s);
+            }
             if !v.is_empty() {
                 let total_bytes: u64 = v.iter().map(|s| s.bytes).sum();
                 let wall_ms = total_start.map(|t| t.elapsed().as_millis()).unwrap_or(0);
                 eprintln!("\nExtraction statistics:");
                 for s in v.iter() {
-                    let gbps = if s.ms > 0 { (s.bytes as f64) / (s.ms as f64) / 1_000_000.0 } else { 0.0 };
-                    eprintln!("  - {}: {} in {} ms ({:.2} GB/s)", s.name, indicatif::HumanBytes(s.bytes), s.ms, gbps);
+                    let gbps = if s.ms > 0 {
+                        (s.bytes as f64) / (s.ms as f64) / 1_000_000.0
+                    } else {
+                        0.0
+                    };
+                    eprintln!(
+                        "  - {}: {} in {} ms ({:.2} GB/s)",
+                        s.name,
+                        indicatif::HumanBytes(s.bytes),
+                        s.ms,
+                        gbps
+                    );
                 }
                 if wall_ms > 0 {
                     let total_gbps = (total_bytes as f64) / (wall_ms as f64) / 1_000_000.0;
-                    eprintln!("  Total: {} in {} ms ({:.2} GB/s)", indicatif::HumanBytes(total_bytes), wall_ms, total_gbps);
+                    eprintln!(
+                        "  Total: {} in {} ms ({:.2} GB/s)",
+                        indicatif::HumanBytes(total_bytes),
+                        wall_ms,
+                        total_gbps
+                    );
                 } else {
                     eprintln!("  Total: {}", indicatif::HumanBytes(total_bytes));
                 }
@@ -1348,7 +1416,8 @@ impl<'a> Extractor<'a> {
     fn validate_non_overlapping_extents(&self, operations: &[InstallOperation]) -> Result<()> {
         // Heuristic: Most operations have 1-2 extents. Pre-allocating 20% more than ops
         // minimizes reallocations without wasting significant memory.
-        let mut extents: Vec<(u64, u64)> = Vec::with_capacity(operations.len() + (operations.len() / 5));
+        let mut extents: Vec<(u64, u64)> =
+            Vec::with_capacity(operations.len() + (operations.len() / 5));
 
         for op in operations {
             for e in &op.dst_extents {
@@ -1447,7 +1516,10 @@ impl<'a> Extractor<'a> {
         let metadata = match fs::metadata(path) {
             Ok(m) => m,
             Err(ref e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e).with_context(|| format!("failed to read metadata for: {}", path.display())),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read metadata for: {}", path.display()));
+            }
         };
 
         if metadata.is_file() {
