@@ -78,6 +78,13 @@ struct HashRec {
     hex: String,
 }
 
+// State for automatic file cleanup on interrupt or panic
+struct CleanupState {
+    files: Vec<PathBuf>,
+    dir: PathBuf,
+    dir_is_new: bool,
+}
+
 // Shared per-partition worker state to reduce Arc clones per operation
 struct WorkerContext {
     partition_file: Arc<MmapMut>,
@@ -88,7 +95,6 @@ struct WorkerContext {
     first_error: Arc<Mutex<Option<anyhow::Error>>>,
     remaining_ops: Arc<AtomicUsize>,
     partition_len: usize,
-    zero_ops_are_noops: bool,
 }
 
 impl Deref for PayloadSource {
@@ -158,7 +164,7 @@ impl<'a> Extractor<'a> {
         std::io::stdin().read_line(&mut input)?;
         let input = input.trim().to_lowercase();
 
-        if input == "n" {
+        if input != "y" && input != "yes" {
             println!("Aborted.");
             return Ok(());
         }
@@ -428,11 +434,11 @@ impl<'a> Extractor<'a> {
         // Create/ensure output directory and detect if it was newly created
         let (partition_dir, created_new_dir) = self.create_partition_dir()?;
 
-        let cleanup_state = Arc::new(Mutex::new((
-            Vec::<PathBuf>::new(),
-            partition_dir.to_path_buf(),
-            created_new_dir,
-        )));
+        let cleanup_state = Arc::new(Mutex::new(CleanupState {
+            files: Vec::new(),
+            dir: partition_dir.to_path_buf(),
+            dir_is_new: created_new_dir,
+        }));
 
         let cancellation_token = Arc::new(AtomicBool::new(false));
 
@@ -450,7 +456,9 @@ impl<'a> Extractor<'a> {
 
             // Best-effort cleanup — avoid blocking in signal handler
             if let Ok(state) = cleanup_state_ctrlc.try_lock() {
-                let (files, dir, dir_is_new) = &*state;
+                let files = &state.files;
+                let dir = &state.dir;
+                let dir_is_new = state.dir_is_new;
 
                 if !files.is_empty() {
                     eprintln!("Removing {} partially extracted file(s)...", files.len());
@@ -469,7 +477,7 @@ impl<'a> Extractor<'a> {
                     }
                 }
 
-                if *dir_is_new && dir.exists() {
+                if dir_is_new && dir.exists() {
                     if fs::remove_dir_all(dir).is_ok() {
                         eprintln!("Removed temporary extraction directory: {}", dir.display());
                     } else {
@@ -498,14 +506,13 @@ impl<'a> Extractor<'a> {
         let cleanup_state_clone = Arc::clone(&cleanup_state);
         std::panic::set_hook(Box::new(move |_panic_info| {
             if let Ok(state) = cleanup_state_clone.lock() {
-                let (files, dir, dir_is_new) = &*state;
                 // Try to remove created files
-                for f in files {
+                for f in &state.files {
                     let _ = fs::remove_file(f);
                 }
                 // If we created the directory, try to remove it as well
-                if *dir_is_new {
-                    let _ = fs::remove_dir_all(dir);
+                if state.dir_is_new {
+                    let _ = fs::remove_dir_all(&state.dir);
                 }
                 eprintln!(
                     "Extraction aborted due to an error. Any partially extracted partition images have been deleted to prevent misuse."
@@ -543,7 +550,6 @@ impl<'a> Extractor<'a> {
         threadpool.scope(|scope| -> Result<()> {
             let multiprogress = MultiProgress::new();
 
-            // Maintain the manifest/extraction order for neatly printing hashes later
             for (hash_index_counter, update) in manifest
                 .partitions
                 .iter()
@@ -553,214 +559,277 @@ impl<'a> Extractor<'a> {
                 })
                 .enumerate()
             {
-                self.validate_non_overlapping_extents(&update.operations)
-                    .with_context(|| {
-                        format!("Invalid extents in partition '{}'", update.partition_name)
-                    })?;
-                if cancellation_token.load(Ordering::Acquire) {
-                    eprintln!(
-                        "Extraction cancelled before processing '{}'",
-                        update.partition_name
-                    );
+                if self.process_partition(
+                    scope,
+                    &multiprogress,
+                    hash_index_counter,
+                    update,
+                    payload,
+                    block_size,
+                    &partition_dir,
+                    &cleanup_state,
+                    &cancellation_token,
+                    &first_error,
+                    &stats_sender,
+                    &hash_sender,
+                    simd,
+                )? {
                     break;
-                }
-                let zero_bytes: u64 = update
-                    .operations
-                    .iter()
-                    .filter(|op| {
-                        matches!(Type::try_from(op.r#type), Ok(Type::Zero | Type::Discard))
-                    })
-                    .flat_map(|op| &op.dst_extents)
-                    .map(|e| {
-                        let blocks = e.num_blocks.unwrap_or(0);
-                        blocks * block_size as u64
-                    })
-                    .sum();
-
-                let total_bytes = update
-                    .new_partition_info
-                    .as_ref()
-                    .and_then(|i| i.size)
-                    .unwrap_or(0);
-
-                let zero_heavy = total_bytes > 0 && zero_bytes * 100 / total_bytes >= 50;
-
-                let progress_bar = self.create_progress_bar(update)?;
-                let progress_bar = multiprogress.add(progress_bar);
-                let (mut partition_file, partition_len, out_path) =
-                    self.open_partition_file(update, &partition_dir)?;
-
-                if zero_heavy {
-                    let mmap = Arc::get_mut(&mut partition_file)
-                        .expect("partition_file Arc unexpectedly shared");
-                    mmap.fill(0);
-                }
-
-                // Track the file we just created for cleanup in case of errors
-                if let Ok(mut state) = cleanup_state.lock() {
-                    state.0.push(out_path);
-                }
-
-                let part_start = if self.cmd.stats {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                let stats_sender = stats_sender.clone();
-
-                // Assign an order index for hash printing
-                let part_index = hash_index_counter;
-                let ctx = Arc::new(WorkerContext {
-                    partition_file: partition_file.clone(),
-                    part_name: Arc::from(update.partition_name.as_str()),
-                    cancellation_token: cancellation_token.clone(),
-                    stats_sender: stats_sender.clone(),
-                    hash_sender: hash_sender.clone(),
-                    first_error: first_error.clone(),
-                    remaining_ops: Arc::new(AtomicUsize::new(update.operations.len())),
-                    partition_len,
-                    zero_ops_are_noops: zero_heavy,
-                });
-                let ops = &update.operations;
-                // Use smaller chunks for small partitions to reduce tail latency,
-                // larger chunks for big partitions to amortize Rayon scheduling cost.
-                let chunk_size = if ops.len() < 64 { 8 } else { 16 };
-
-                let base_ptr = PartitionPtr(partition_file.as_ptr() as *mut u8);
-                // Progress invariant:
-                // Each InstallOperation MUST increment the progress bar exactly once,
-                // regardless of execution path (serial or parallel).
-                if ops.len() <= 2 {
-                    // SERIAL FAST PATH
-                    for op in ops {
-                        if ctx.cancellation_token.load(Ordering::Acquire) {
-                            break;
-                        }
-
-                        let result = self.run_op_raw(
-                            &ctx,
-                            op,
-                            payload,
-                            base_ptr,
-                            ctx.partition_len,
-                            block_size,
-                            &ctx.part_name,
-                            simd,
-                        );
-
-                        match result {
-                            Ok(bytes) => {
-                                progress_bar.inc(bytes as u64);
-                            }
-                            Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
-                                ctx.cancellation_token.store(true, Ordering::Release);
-                                if slot.is_none() {
-                                    *slot = Some(e.context(format!(
-                                        "Error in partition '{}'",
-                                        ctx.part_name
-                                    )));
-                                }
-                                return Ok(());
-                            }
-                            Err(_) => return Ok(()),
-                        }
-                    }
-
-                    if !ctx.cancellation_token.load(Ordering::Acquire) {
-                        self.post_process_partition(&ctx, update, simd, part_index, part_start);
-                    }
-                } else {
-                    // PARALLEL CHUNKED PATH
-                    for chunk in ops.chunks(chunk_size) {
-                        let progress_bar = progress_bar.clone();
-                        let ctx = ctx.clone();
-
-
-                        scope.spawn(move |_| {
-                            let mut chunk_bytes_processed = 0usize; // Buffer for this thread's chunk
-
-                            for op in chunk {
-                                if ctx.cancellation_token.load(Ordering::Acquire) {
-                                    return;
-                                }
-
-                                let result = self.run_op_raw(
-                                    &ctx,
-                                    op,
-                                    payload,
-                                    base_ptr,
-                                    ctx.partition_len,
-                                    block_size,
-                                    &ctx.part_name,
-                                    simd,
-                                );
-
-                                match result {
-                                    Ok(bytes) => {
-                                        chunk_bytes_processed += bytes;
-                                    }
-                                    Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
-                                        ctx.cancellation_token.store(true, Ordering::Release);
-                                        if slot.is_none() {
-                                            *slot = Some(e.context(format!(
-                                                "Error in partition '{}'",
-                                                ctx.part_name
-                                            )));
-                                        }
-                                        return;
-                                    }
-                                    Err(_) => return,
-                                }
-                            }
-
-                            // Batch update: Call inc() once per chunk instead of once per operation
-                            if chunk_bytes_processed > 0 {
-                                progress_bar.inc(chunk_bytes_processed as u64);
-                            }
-
-                            if ctx.remaining_ops.fetch_sub(chunk.len(), Ordering::Release)
-                                == chunk.len()
-                            {
-                                self.post_process_partition(
-                                    &ctx, update, simd, part_index, part_start,
-                                );
-                            }
-                        });
-                    }
                 }
             }
             Ok(())
         })?;
 
-        // Check if extraction was cancelled due to critical errors
+        // 5. Finalize: Error check, Reporting, and UI
         if cancellation_token.load(Ordering::Acquire) {
-            // Clean up any partially extracted files
-            if let Ok(state) = cleanup_state.lock() {
-                let (files, dir, dir_is_new) = &*state;
-                // Try to remove created files
-                for f in files {
-                    let _ = fs::remove_file(f);
-                }
-                // If we created the directory, try to remove it as well
-                if *dir_is_new {
-                    let _ = fs::remove_dir_all(dir);
-                }
-            }
-            // Print the stored error message
-            if let Some(err) = first_error.lock().unwrap().take() {
-                eprintln!("\n{}", err);
-            }
+            self.handle_critical_error(&cleanup_state, &first_error)?;
+        }
 
-            bail!(
-                "❌ Extraction failed due to errors (see above). All partial files have been cleaned up."
+        self.print_final_reports(hash_receiver, stats_receiver, total_start, &partition_dir)?;
+
+        if let Ok(mut state) = cleanup_state.lock() {
+            state.files.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Handles a single partition's extraction lifecycle.
+    /// Returns Ok(true) if extraction was cancelled.
+    #[allow(clippy::too_many_arguments)]
+    fn process_partition<'s>(
+        &'s self,
+        scope: &rayon::Scope<'s>,
+        multiprogress: &MultiProgress,
+        part_index: usize,
+        update: &'s PartitionUpdate,
+        payload: &'s Payload,
+        block_size: usize,
+        partition_dir: &Path,
+        cleanup_state: &Arc<Mutex<CleanupState>>,
+        cancellation_token: &Arc<AtomicBool>,
+        first_error: &Arc<Mutex<Option<anyhow::Error>>>,
+        stats_sender: &Option<crossbeam_channel::Sender<Stat>>,
+        hash_sender: &Option<crossbeam_channel::Sender<HashRec>>,
+        simd: CpuSimd,
+    ) -> Result<bool> {
+        self.validate_non_overlapping_extents(&update.operations)
+            .with_context(|| format!("Invalid extents in partition '{}'", update.partition_name))?;
+
+        if cancellation_token.load(Ordering::Acquire) {
+            eprintln!(
+                "Extraction cancelled before processing '{}'",
+                update.partition_name
+            );
+            return Ok(true);
+        }
+
+        let progress_bar = multiprogress.add(self.create_progress_bar(update)?);
+        let (partition_file, partition_len, out_path) =
+            self.open_partition_file(update, partition_dir)?;
+
+        match cleanup_state.lock() {
+            Ok(mut guard) => guard.files.push(out_path),
+            Err(poisoned) => {
+                eprintln!("warning: cleanup lock poisoned by previous panic");
+                poisoned.into_inner().files.push(out_path);
+            }
+        }
+
+        let part_start = if self.cmd.stats {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        let ctx = Arc::new(WorkerContext {
+            partition_file: partition_file.clone(),
+            part_name: Arc::from(update.partition_name.as_str()),
+            cancellation_token: cancellation_token.clone(),
+            stats_sender: stats_sender.clone(),
+            hash_sender: hash_sender.clone(),
+            first_error: first_error.clone(),
+            remaining_ops: Arc::new(AtomicUsize::new(update.operations.len())),
+            partition_len,
+        });
+
+        let ops = &update.operations;
+        let base_ptr = PartitionPtr(partition_file.as_ptr() as *mut u8);
+
+        if ops.len() <= 2 {
+            self.dispatch_serial(
+                ctx,
+                ops,
+                payload,
+                base_ptr,
+                block_size,
+                simd,
+                progress_bar,
+                update,
+                part_index,
+                part_start,
+            )?;
+        } else {
+            self.dispatch_parallel(
+                scope,
+                ctx,
+                ops,
+                payload,
+                base_ptr,
+                block_size,
+                simd,
+                progress_bar,
+                update,
+                part_index,
+                part_start,
             );
         }
 
-        if let Ok(mut state) = cleanup_state.lock() {
-            state.0.clear();
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_serial(
+        &self,
+        ctx: Arc<WorkerContext>,
+        ops: &[InstallOperation],
+        payload: &Payload,
+        base_ptr: PartitionPtr,
+        block_size: usize,
+        simd: CpuSimd,
+        progress_bar: ProgressBar,
+        update: &PartitionUpdate,
+        part_index: usize,
+        part_start: Option<Instant>,
+    ) -> Result<()> {
+        for op in ops {
+            if ctx.cancellation_token.load(Ordering::Acquire) {
+                break;
+            }
+
+            match self.run_op_raw(
+                op,
+                payload,
+                base_ptr,
+                ctx.partition_len,
+                block_size,
+                &ctx.part_name,
+                simd,
+            ) {
+                Ok(bytes) => progress_bar.inc(bytes as u64),
+                Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
+                    ctx.cancellation_token.store(true, Ordering::Release);
+                    if slot.is_none() {
+                        *slot = Some(e.context(format!("Error in partition '{}'", ctx.part_name)));
+                    }
+                    return Ok(());
+                }
+                Err(_) => {
+                    eprintln!(
+                        "\nCritical error: An extraction error occurred, and the system additionally failed to acquire a lock to record the details. Aborting..."
+                    );
+                    ctx.cancellation_token.store(true, Ordering::Release);
+                    return Ok(());
+                }
+            }
         }
-        // Print partition hashes (cleanly) if requested
-        if let Some(receiver) = hash_receiver.as_ref() {
+
+        if !ctx.cancellation_token.load(Ordering::Acquire) {
+            self.post_process_partition(&ctx, update, simd, part_index, part_start);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_parallel<'s>(
+        &'s self,
+        scope: &rayon::Scope<'s>,
+        ctx: Arc<WorkerContext>,
+        ops: &'s [InstallOperation],
+        payload: &'s Payload,
+        base_ptr: PartitionPtr,
+        block_size: usize,
+        simd: CpuSimd,
+        progress_bar: ProgressBar,
+        update: &'s PartitionUpdate,
+        part_index: usize,
+        part_start: Option<Instant>,
+    ) {
+        let chunk_size = if ops.len() < 64 { 8 } else { 16 };
+
+        for chunk in ops.chunks(chunk_size) {
+            let pb = progress_bar.clone();
+            let ctx = ctx.clone();
+
+            scope.spawn(move |_| {
+                let mut chunk_bytes = 0usize;
+                for op in chunk {
+                    if ctx.cancellation_token.load(Ordering::Acquire) { return; }
+
+                    match self.run_op_raw(op, payload, base_ptr, ctx.partition_len, block_size, &ctx.part_name, simd) {
+                        Ok(bytes) => chunk_bytes += bytes,
+                        Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
+                            ctx.cancellation_token.store(true, Ordering::Release);
+                            if slot.is_none() {
+                                *slot = Some(e.context(format!("Error in partition '{}'", ctx.part_name)));
+                            }
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("\nCritical error: An extraction error occurred, and the system additionally failed to acquire a lock to record the details. Aborting...");
+                            ctx.cancellation_token.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+
+                if chunk_bytes > 0 {
+                    pb.inc(chunk_bytes as u64);
+                }
+
+                if ctx.remaining_ops.fetch_sub(chunk.len(), Ordering::AcqRel) == chunk.len() {
+                    self.post_process_partition(&ctx, update, simd, part_index, part_start);
+                }
+            });
+        }
+    }
+
+    fn handle_critical_error(
+        &self,
+        cleanup_state: &Arc<Mutex<CleanupState>>,
+        first_error: &Arc<Mutex<Option<anyhow::Error>>>,
+    ) -> Result<()> {
+        if let Ok(state) = cleanup_state.lock() {
+            for f in &state.files {
+                let _ = fs::remove_file(f);
+            }
+            if state.dir_is_new {
+                let _ = fs::remove_dir_all(&state.dir);
+            }
+        }
+        let error = match first_error.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => {
+                eprintln!("warning: error lock poisoned by previous panic");
+                poisoned.into_inner().take()
+            }
+        };
+        if let Some(err) = error {
+            eprintln!("\n{}", err);
+        }
+        bail!(
+            "❌ Extraction failed due to errors (see above). All partial files have been cleaned up."
+        );
+    }
+
+    fn print_final_reports(
+        &self,
+        hash_receiver: Option<crossbeam_channel::Receiver<HashRec>>,
+        stats_receiver: Option<crossbeam_channel::Receiver<Stat>>,
+        total_start: Option<Instant>,
+        partition_dir: &Path,
+    ) -> Result<()> {
+        if let Some(receiver) = hash_receiver {
             let mut v: Vec<HashRec> = Vec::new();
             while let Ok(r) = receiver.try_recv() {
                 v.push(r);
@@ -768,14 +837,13 @@ impl<'a> Extractor<'a> {
             if !v.is_empty() {
                 v.sort_by_key(|r| r.order);
                 println!("Partition hashes (SHA-256):");
-                for r in v.iter() {
+                for r in v {
                     println!("{}: sha256={}", r.name, r.hex);
                 }
             }
         }
 
-        // Print stats summary if requested
-        if let Some(receiver) = stats_receiver.as_ref() {
+        if let Some(receiver) = stats_receiver {
             let mut v: Vec<Stat> = Vec::new();
             while let Ok(s) = receiver.try_recv() {
                 v.push(s);
@@ -812,19 +880,12 @@ impl<'a> Extractor<'a> {
             }
         }
 
-        // If we got here, everything succeeded; clear cleanup state
-        if let Ok(mut state) = cleanup_state.lock() {
-            state.0.clear(); // Clear the file list so no cleanup happens
-        }
-
-        // Calculate and display extracted folder size
         if !self.cmd.quiet {
-            self.display_extracted_folder_size(&partition_dir)?;
+            self.display_extracted_folder_size(partition_dir)?;
         }
 
-        // Automatically open the extracted folder (unless disabled)
         if !self.cmd.no_open && !self.cmd.quiet {
-            self.open_extracted_folder(&partition_dir)?;
+            self.open_extracted_folder(partition_dir)?;
         }
 
         Ok(())
@@ -853,7 +914,6 @@ impl<'a> Extractor<'a> {
             .with_style(style))
     }
 
-    #[inline]
     fn post_process_partition(
         &self,
         ctx: &WorkerContext,
@@ -940,7 +1000,7 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// # Safety
+    /// # Soundness
     /// This function is the core of otaripper's high-performance extraction.
     /// It is sound because:
     /// 1.`base_ptr` is guaranteed to be valid for `partition_len` as long as the
@@ -950,10 +1010,8 @@ impl<'a> Extractor<'a> {
     /// 3. `validate_non_overlapping_extents` proves that no two threads can receive
     ///   the same memory range, preventing data races and mutable aliasing UB.
     #[allow(clippy::too_many_arguments)]
-    #[inline(always)]
     fn run_op_raw(
         &self,
-        ctx: &WorkerContext,
         op: &InstallOperation,
         payload: &Payload,
         base_ptr: PartitionPtr,
@@ -1245,28 +1303,34 @@ impl<'a> Extractor<'a> {
 
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut mmap = {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(true).create_new(true);
+
+            // windows-only optimization: aggressive kernel readahead
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                opts.custom_flags(0x08000000); // FILE_FLAG_SEQUENTIAL_SCAN
+            }
+
+            let file = opts
                 .open(&path)
                 .with_context(|| format!("unable to open file for writing: {path:?}"))?;
             file.set_len(partition_len)?;
-            unsafe { MmapMut::map_mut(&file) }
-                .with_context(|| format!("failed to mmap file: {path:?}"))?
-        };
-        // Linux-only sequential access hint for mmap writes
-        #[cfg(target_os = "linux")]
-        {
-            use libc::{MADV_SEQUENTIAL, madvise};
-            unsafe {
-                madvise(
-                    mmap.as_mut_ptr() as *mut libc::c_void,
-                    mmap.len(),
-                    MADV_SEQUENTIAL,
-                );
+            
+            let mut mmap_mut = unsafe { MmapMut::map_mut(&file) }
+                .with_context(|| format!("failed to mmap file: {path:?}"))?;
+
+            // Linux-only sequential access hint (clean memmap2 API)
+            #[cfg(target_os = "linux")]
+            {
+                if let Err(e) = mmap_mut.advise(memmap2::Advice::Sequential) {
+                    // We use eprintln for a simple warning that doesn't stop extraction
+                    eprintln!("Warning: Failed to set sequential readahead hint: {}", e);
+                }
             }
-        }
+            mmap_mut
+        };
 
         let partition = Arc::new(mmap);
         Ok((partition, partition_len as usize, path))
@@ -1356,7 +1420,10 @@ impl<'a> Extractor<'a> {
     /// Implementation uses an O(n log n) sorted interval sweep.
     /// This is acceptable because extents per partition are typically small.
     fn validate_non_overlapping_extents(&self, operations: &[InstallOperation]) -> Result<()> {
-        let mut extents: Vec<(u64, u64)> = Vec::with_capacity(operations.len() * 2);
+        // Heuristic: Most operations have 1-2 extents. Pre-allocating 20% more than ops
+        // minimizes reallocations without wasting significant memory.
+        let mut extents: Vec<(u64, u64)> =
+            Vec::with_capacity(operations.len() + (operations.len() / 5));
 
         for op in operations {
             for e in &op.dst_extents {
@@ -1400,19 +1467,16 @@ impl<'a> Extractor<'a> {
     }
 
     fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
+        let now = Local::now();
+        let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
+
         let dir = match &self.cmd.output_dir {
-            Some(output_base) => {
-                let now = Local::now();
-                let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
-                output_base.join(timestamp_folder)
-            }
+            Some(output_base) => output_base.join(&timestamp_folder),
             None => {
-                let now = Local::now();
                 let current_dir = env::current_dir().with_context(|| {
                     "Failed to determine current directory. Please specify --output-dir explicitly."
                 })?;
-                let filename = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
-                current_dir.join(filename)
+                current_dir.join(&timestamp_folder)
             }
         };
         let existed = dir.exists();
@@ -1455,12 +1519,14 @@ impl<'a> Extractor<'a> {
 
     /// Recursively calculate the size of a directory and its contents
     fn calculate_directory_size(&self, path: &Path) -> Result<u64> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        let metadata = fs::metadata(path)
-            .with_context(|| format!("failed to read metadata for: {}", path.display()))?;
+        let metadata = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(ref e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read metadata for: {}", path.display()));
+            }
+        };
 
         if metadata.is_file() {
             return Ok(metadata.len());
@@ -1530,7 +1596,6 @@ impl<'a> Extractor<'a> {
 
         Ok(())
     }
-    #[inline]
     fn is_incremental_partition(p: &PartitionUpdate) -> bool {
         p.operations.iter().any(|op| {
             matches!(
