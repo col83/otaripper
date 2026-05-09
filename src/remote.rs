@@ -20,6 +20,10 @@ pub fn fetch_http_chunk(
     pb: &ProgressBar,
     total_dst_size: usize,
 ) -> anyhow::Result<Vec<u8>> {
+    // prevent u64 underflow panic on 0 byte operations
+    if size == 0 {
+        return Ok(Vec::new());
+    }
     let end = start + size as u64 - 1;
     let mut buf = vec![0u8; size];
     
@@ -35,33 +39,45 @@ pub fn fetch_http_chunk(
         let req_start = start + total_read as u64;
 
         match client.get(url).header("Range", format!("bytes={}-{}", req_start, end)).send() {
-            Ok(mut resp) if resp.status().is_success() => {
-                let mut chunk = [0u8; CHUNK_SIZE];
-                
-                loop {
-                    let n = match resp.read(&mut chunk) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => n,
-                        Err(e) => {
-                            if attempts >= MAX_RETRIES { bail!("Connection died and ran out of retries: {}", e); }
-                            break;
+            Ok(mut resp) => {
+                // check If the server returns 200 OK, it ignored our Range request
+                // and is trying to send the entire ROM, Bail gracefully!
+                if resp.status() == reqwest::StatusCode::OK {
+                    bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                } else if !resp.status().is_success() {
+                    if attempts >= MAX_RETRIES { bail!("Server rejected range request: {}", resp.status()); }
+                } else {
+                    let mut chunk = [0u8; CHUNK_SIZE];
+                    
+                    loop {
+                        let n = match resp.read(&mut chunk) {
+                            Ok(0) => break, // EOF
+                            Ok(n) => n,
+                            Err(e) => {
+                                if attempts >= MAX_RETRIES { bail!("Connection died and ran out of retries: {}", e); }
+                                break;
+                            }
+                        };
+
+                        // prevent buffer overflows if a rogue server sends too much data
+                        if total_read + n > size {
+                            bail!("Rogue server sent more data than requested, Aborting to prevent memory corruption!");
                         }
-                    };
 
-                    buf[total_read..total_read + n].copy_from_slice(&chunk[..n]);
-                    total_read += n;
-                    NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                        buf[total_read..total_read + n].copy_from_slice(&chunk[..n]);
+                        total_read += n;
+                        NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
 
-                    // Sync UI in real time
-                    let expected = (total_read as f64 * ratio) as u64;
-                    let diff = expected.saturating_sub(ui_reported);
-                    if diff > 0 {
-                        pb.inc(diff);
-                        ui_reported += diff;
+                        // Sync UI in real time
+                        let expected = (total_read as f64 * ratio) as u64;
+                        let diff = expected.saturating_sub(ui_reported);
+                        if diff > 0 {
+                            pb.inc(diff);
+                            ui_reported += diff;
+                        }
                     }
                 }
             }
-            Ok(resp) if attempts >= MAX_RETRIES => bail!("Server rejected range request: {}", resp.status()),
             Err(e) if attempts >= MAX_RETRIES => bail!("Network timeout/error: {}", e),
             _ => {}
         }
@@ -106,7 +122,9 @@ impl CachingHttpReader {
         let mut head_buf = Vec::new();
         if head_size > 0 {
             let mut req = client.get(url).header("Range", format!("bytes=0-{}", head_size - 1)).send()?;
-            if req.status().is_success() {
+            if req.status() == reqwest::StatusCode::OK {
+                bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+            } else if req.status().is_success() {
                 if let Ok(n) = req.read_to_end(&mut head_buf) {
                     NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
                 }
@@ -119,7 +137,9 @@ impl CachingHttpReader {
         let mut tail_buf = Vec::new();
         if tail_start < length {
             let mut req = client.get(url).header("Range", format!("bytes={}-{}", tail_start, length - 1)).send()?;
-            if req.status().is_success() {
+            if req.status() == reqwest::StatusCode::OK {
+                bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+            } else if req.status().is_success() {
                 if let Ok(n) = req.read_to_end(&mut tail_buf) {
                     NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
                 }

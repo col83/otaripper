@@ -512,7 +512,17 @@ impl<'a> Extractor<'a> {
 
         // Set up panic hook to trigger cleanup on any thread panic
         let cleanup_state_clone = Arc::clone(&cleanup_state);
-        std::panic::set_hook(Box::new(move |_panic_info| {
+        std::panic::set_hook(Box::new(move |panic_info| {
+            // extract the actual panic message to tell the user what went wrong
+            let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "Unknown panic"
+            };
+            let location = panic_info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_else(|| "unknown location".to_string());
+            eprintln!("\n FATAL THREAD PANIC at {}: {}", location, msg);
             if let Ok(state) = cleanup_state_clone.lock() {
                 // Try to remove created files
                 for f in &state.files {
@@ -523,7 +533,7 @@ impl<'a> Extractor<'a> {
                     let _ = fs::remove_dir_all(&state.dir);
                 }
                 eprintln!(
-                    "Extraction aborted due to an error. Any partially extracted partition images have been deleted to prevent misuse."
+                    "Extraction aborted cleanly after a fatal error. Any partially extracted partition images have been deleted to prevent misuse."
                 );
             }
         }));
@@ -819,7 +829,7 @@ impl<'a> Extractor<'a> {
             }
         };
         if let Some(err) = error {
-            eprintln!("\n{}", err);
+            eprintln!("\n{:?}", err);
         }
         bail!(
             "❌ Extraction failed due to errors (see above). All partial files have been cleaned up."
@@ -913,7 +923,7 @@ impl<'a> Extractor<'a> {
         .progress_chars("=> ");
 
         Ok(ProgressBar::new(total_bytes)
-            .with_finish(ProgressFinish::AndLeave)
+            .with_finish(ProgressFinish::Abandon) // FREEZE the bar exactly where it crashed
             .with_prefix(update.partition_name.to_string())
             .with_style(style))
     }
@@ -1231,6 +1241,15 @@ impl<'a> Extractor<'a> {
             
             let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
             let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
+            
+            // prevent exabyte OOM panics from malicious servers sending garbage data
+            // max manifest size is 256MB, anything larger is mathematically a rogue server
+            anyhow::ensure!(
+                manifest_size <= 256 * 1024 * 1024,
+                "Server sent impossible manifest size ({} bytes), The connection is corrupt or malicious!",
+                manifest_size
+            );
+
             let (header_size, sig_size) = if file_format_version >= 2 {
                 (24, u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize)
             } else { (20, 0) };
