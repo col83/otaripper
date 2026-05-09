@@ -130,6 +130,20 @@ Prebuilt binaries are available on the
 * macOS (Intel): `otaripper-x86_64-apple-darwin`
 * macOS (Apple Silicon): `otaripper-aarch64-apple-darwin`
 
+### Windows (winget)
+
+otaripper is available via the Windows Package Manager:
+
+```powershell
+winget install syedinsaf.otaripper
+```
+
+To update to the latest version:
+
+```powershell
+winget upgrade syedinsaf.otaripper
+```
+
 ## Arch Linux (AUR)
 
 otaripper is available on the AUR:
