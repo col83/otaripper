@@ -113,7 +113,7 @@ pub struct Cmd {
 
     /// Positional argument for the payload file
     #[clap(value_hint = ValueHint::FilePath)]
-    #[clap(index = 1, value_name = "PATH")]
+    #[clap(index = 1, value_name = "PATH_OR_URL")]
     pub(super) positional_payload: Option<PathBuf>,
 
     /// Internal flag to suppress output
@@ -147,10 +147,12 @@ const FRIENDLY_HELP: &str = color_print::cstr!(
 
 <bold>QUICK START</bold>
   • Drag & drop an OTA .zip or payload.bin onto the executable.
-  • Or run via command line: <cyan>otaripper update.zip</cyan>
+  • Extract from a local file: <cyan>otaripper update.zip</cyan>
+  • Stream directly from URL:  <cyan>otaripper https://example.com/ota.zip</cyan>
 
 <bold>COMMON TASKS</bold>
-  • <bold>List</bold> partitions:                            otaripper -l update.zip
+  <italic>(Tip: You can replace 'update.zip' with an HTTP URL in any command!)</italic>
+  • <bold>List</bold> remote/local partitions:               otaripper -l update.zip
   • <bold>Extract everything</bold>:                         otaripper update.zip
   • <bold>Extract specific</bold>:                           otaripper update.zip -p boot,init_boot,vendor_boot
   • <bold>Disable auto-open folder after extraction: </bold> otaripper update.zip -n

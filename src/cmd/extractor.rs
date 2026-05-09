@@ -210,14 +210,20 @@ impl<'a> Extractor<'a> {
 
         let payload_path = self.cmd.positional_payload.as_ref()
             .ok_or_else(|| anyhow::anyhow!(
-                "No payload file specified.\n\
+                "No payload file or URL specified.\n\
         \n\
         Usage:\n\
-          otaripper <payload.zip | payload.bin>\n\
+          otaripper <payload.zip | payload.bin | HTTP URL>\n\
           otaripper arbscan <xbl_config.img>\n\
         \n\
         Examples:\n\
-          • Extract everything:\n\
+          • Stream an entire OTA directly from a URL:\n\
+              otaripper https://example.com/rom.zip\n\
+        \n\
+          • Stream only specific partitions from a URL (massive bandwidth W):\n\
+              otaripper https://example.com/rom.zip -p boot,init_boot\n\
+        \n\
+          • Extract a local file:\n\
               otaripper update.zip\n\
         \n\
           • Extract only specific partitions:\n\
