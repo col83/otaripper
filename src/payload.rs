@@ -6,13 +6,22 @@ const MAX_MANIFEST_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
 const SUPPORTED_VERSION_MAX: u64 = 2;
 
 #[derive(Debug)]
+pub enum PayloadData<'a> {
+    Local(&'a [u8]),
+    Remote {
+        url: String,
+        data_offset: u64,
+        client: reqwest::blocking::Client,
+    },
+}
+
 #[allow(dead_code)]
 pub struct Payload<'a> {
     pub file_format_version: u64,
     pub manifest_size: u64,
     pub manifest: &'a [u8],
     pub metadata_signature: Option<&'a [u8]>,
-    pub data: &'a [u8],
+    pub data: PayloadData<'a>,
 }
 
 impl<'a> Payload<'a> {
@@ -120,7 +129,42 @@ impl<'a> Payload<'a> {
             } else {
                 None
             },
-            data: &bytes[data_start..],
+            data: PayloadData::Local(&bytes[data_start..]),
+        })
+    }
+
+    pub fn parse_remote(
+        manifest_buf: &'a [u8],
+        url: String,
+        payload_base_offset: u64,
+        client: reqwest::blocking::Client,
+    ) -> Result<Self> {
+        let file_format_version = u64::from_be_bytes(manifest_buf[4..12].try_into().unwrap());
+        let manifest_size = u64::from_be_bytes(manifest_buf[12..20].try_into().unwrap());
+
+        let (header_size, sig_size) = if file_format_version >= 2 {
+            (24, u32::from_be_bytes(manifest_buf[20..24].try_into().unwrap()) as usize)
+        } else {
+            (20, 0)
+        };
+
+        let manifest_len = manifest_size as usize;
+        let data_start = header_size + manifest_len + sig_size;
+
+        Ok(Self {
+            file_format_version,
+            manifest_size,
+            manifest: &manifest_buf[header_size..header_size + manifest_len],
+            metadata_signature: if sig_size > 0 {
+                Some(&manifest_buf[header_size + manifest_len..data_start])
+            } else {
+                None
+            },
+            data: PayloadData::Remote {
+                url,
+                data_offset: payload_base_offset + data_start as u64,
+                client,
+            },
         })
     }
 }

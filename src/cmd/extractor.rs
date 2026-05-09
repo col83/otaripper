@@ -21,7 +21,6 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
-use std::ops::Deref;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -50,6 +49,12 @@ pub enum PayloadSource {
     MappedOffset(Mmap, usize),
     Owned(Vec<u8>),
     Temp(Mmap, NamedTempFile),
+    Remote {
+        manifest_buf: Vec<u8>,
+        url: String,
+        payload_base_offset: u64,
+        client: reqwest::blocking::Client,
+    },
 }
 
 #[repr(transparent)]
@@ -95,18 +100,6 @@ struct WorkerContext {
     first_error: Arc<Mutex<Option<anyhow::Error>>>,
     remaining_ops: Arc<AtomicUsize>,
     partition_len: usize,
-}
-
-impl Deref for PayloadSource {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        match self {
-            PayloadSource::Mapped(mmap) => mmap,
-            PayloadSource::MappedOffset(mmap, offset) => &mmap[*offset..],
-            PayloadSource::Owned(vec) => vec,
-            PayloadSource::Temp(mmap, _) => mmap,
-        }
-    }
 }
 
 pub(super) struct Extractor<'a> {
@@ -241,10 +234,25 @@ impl<'a> Extractor<'a> {
             ))?
             .clone();
 
-        // Proceed with the rest of the method using payload_path
-        let payload = self.open_payload_file(&payload_path)?;
-        // Because PayloadSource implements Deref, this call works seamlessly.
-        let payload = &Payload::parse(&payload)?;
+        let payload_path_str = payload_path.to_str().context("Path is not valid UTF-8")?;
+
+        let payload_source = self.open_payload_file(payload_path_str)?;
+        let payload_parsed = match &payload_source {
+            PayloadSource::Remote { manifest_buf, url, payload_base_offset, client } => {
+                Payload::parse_remote(manifest_buf, url.clone(), *payload_base_offset, client.clone())?
+            }
+            local_source => {
+                let bytes: &[u8] = match local_source {
+                    PayloadSource::Mapped(m) => m,
+                    PayloadSource::MappedOffset(m, offset) => &m[*offset..],
+                    PayloadSource::Owned(v) => v,
+                    PayloadSource::Temp(m, _) => m,
+                    _ => unreachable!(),
+                };
+                Payload::parse(bytes)?
+            }
+        };
+        let payload = &payload_parsed;
 
         let mut manifest =
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
@@ -715,8 +723,9 @@ impl<'a> Extractor<'a> {
                 block_size,
                 &ctx.part_name,
                 simd,
+                &progress_bar,
             ) {
-                Ok(bytes) => progress_bar.inc(bytes as u64),
+                Ok(()) => {},
                 Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                     ctx.cancellation_token.store(true, Ordering::Release);
                     if slot.is_none() {
@@ -762,12 +771,11 @@ impl<'a> Extractor<'a> {
             let ctx = ctx.clone();
 
             scope.spawn(move |_| {
-                let mut chunk_bytes = 0usize;
                 for op in chunk {
                     if ctx.cancellation_token.load(Ordering::Acquire) { return; }
 
-                    match self.run_op_raw(op, payload, base_ptr, ctx.partition_len, block_size, &ctx.part_name, simd) {
-                        Ok(bytes) => chunk_bytes += bytes,
+                    match self.run_op_raw(op, payload, base_ptr, ctx.partition_len, block_size, &ctx.part_name, simd, &pb) {
+                        Ok(()) => {},
                         Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                             ctx.cancellation_token.store(true, Ordering::Release);
                             if slot.is_none() {
@@ -781,10 +789,6 @@ impl<'a> Extractor<'a> {
                             return;
                         }
                     }
-                }
-
-                if chunk_bytes > 0 {
-                    pb.inc(chunk_bytes as u64);
                 }
 
                 if ctx.remaining_ops.fetch_sub(chunk.len(), Ordering::AcqRel) == chunk.len() {
@@ -1019,7 +1023,8 @@ impl<'a> Extractor<'a> {
         block_size: usize,
         partition_name: &str,
         simd: CpuSimd,
-    ) -> Result<usize> {
+        pb: &ProgressBar,
+    ) -> Result<()> {
         let op_type = Type::try_from(op.r#type)?;
         let raw_extents =
             self.extract_dst_extents_raw(op, base_ptr.0, partition_len, block_size)?;
@@ -1036,33 +1041,36 @@ impl<'a> Extractor<'a> {
 
         match op_type {
             Type::Replace => {
-                let data = self.extract_data(op, payload)?;
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
                 self.run_op_replace_slice(
-                    data,
+                    &*data,
                     &mut dst_extents,
                     block_size,
                     total_dst_size,
                     simd,
                 )?;
-                Ok(total_dst_size)
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                Ok(())
             }
-
             Type::ReplaceBz => {
-                let data = self.extract_data(op, payload)?;
-                let mut decoder = BzDecoder::new(data);
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
+                let mut decoder = BzDecoder::new(&*data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
-                Ok(total_dst_size)
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                Ok(())
             }
             Type::ReplaceXz => {
-                let data = self.extract_data(op, payload)?;
-                let mut decoder = liblzma::read::XzDecoder::new(data);
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
+                let mut decoder = liblzma::read::XzDecoder::new(&*data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
-                Ok(total_dst_size)
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                Ok(())
             }
             Type::Zero | Type::Discard => {
                 // the OS kernel guarantees new file sectors are strictly zeroed.
                 // we safely bypass user-space filling completely to save disk I/O
-                Ok(total_dst_size)
+                pb.inc(total_dst_size as u64);
+                Ok(())
             }
 
             // Catch-all for incremental types (Bsdiff, Brotli, etc.) or unknown future types
@@ -1193,10 +1201,51 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
-    fn open_payload_file(&self, path: &Path) -> Result<PayloadSource> {
+    fn open_payload_file(&self, path_str: &str) -> Result<PayloadSource> {
         use sysinfo::System;
         use tempfile::NamedTempFile;
 
+        // HTTP remote reader logic here
+        if path_str.starts_with("http://") || path_str.starts_with("https://") {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .context("Failed to build HTTP client")?;
+
+            let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str)?;
+            let mut magic = [0u8; 4];
+            reader.read_exact(&mut magic).context("Failed to read remote header")?;
+            reader.seek(std::io::SeekFrom::Start(0))?;
+
+            let mut base_offset = 0;
+            if &magic == b"PK\x03\x04" {
+                let mut archive = ZipArchive::new(&mut reader)?;
+                let zipfile = archive.by_name("payload.bin")
+                    .context("Your ZIP URL does not contain payload.bin")?;
+                base_offset = zipfile.data_start().context("Failed to find data_start inside ZIP URL")?;
+            }
+
+            reader.seek(std::io::SeekFrom::Start(base_offset))?;
+            let mut header = [0u8; 24];
+            reader.read_exact(&mut header)?;
+            
+            let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
+            let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
+            let (header_size, sig_size) = if file_format_version >= 2 {
+                (24, u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize)
+            } else { (20, 0) };
+            
+            let total_metadata_size = header_size + manifest_size as usize + sig_size;
+            let mut manifest_buf = vec![0u8; total_metadata_size];
+            reader.seek(std::io::SeekFrom::Start(base_offset))?;
+            reader.read_exact(&mut manifest_buf)?;
+            
+            return Ok(PayloadSource::Remote {
+                manifest_buf, url: path_str.to_string(), payload_base_offset: base_offset, client
+            });
+        }
+
+        let path = Path::new(path_str);
         // 1. Open the file and peek magic bytes to identify format
         let mut file = File::open(path)
             .with_context(|| format!("unable to open file for reading: {path:?}"))?;
@@ -1355,28 +1404,35 @@ impl<'a> Extractor<'a> {
         Ok((partition, partition_len as usize, path))
     }
 
-    fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload) -> Result<&'b [u8]> {
+    fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload, pb: &ProgressBar, total_dst_size: usize,) -> Result<std::borrow::Cow<'b, [u8]>> {
         let data_len = op.data_length.context("data_length not defined")? as usize;
         let offset = op.data_offset.context("data_offset not defined")? as usize;
 
-        let end_offset = offset
-            .checked_add(data_len)
-            .context("data_offset + data_length overflows")?;
-        ensure!(
-            end_offset <= payload.data.len(),
-            "data range {}..{} exceeds payload size {}",
-            offset,
-            end_offset,
-            payload.data.len()
-        );
+        let data = match &payload.data {
+            crate::payload::PayloadData::Local(local_slice) => {
+                let end_offset = offset
+                    .checked_add(data_len)
+                    .context("data_offset + data_length overflows")?;
+                ensure!(
+                    end_offset <= local_slice.len(),
+                    "data range {}..{} exceeds payload size {}",
+                    offset,
+                    end_offset,
+                    local_slice.len()
+                );
+                std::borrow::Cow::Borrowed(&local_slice[offset..end_offset])
+            },
+            crate::payload::PayloadData::Remote { url, data_offset, client } => {
+                let start = data_offset + offset as u64;
+                let buf = crate::remote::fetch_http_chunk(client, url, start, data_len, pb, total_dst_size)?;
+                std::borrow::Cow::Owned(buf)
+            }
+        };
 
-        let data = &payload.data[offset..end_offset];
-
-        if !self.cmd.no_verify
-            && let Some(hash) = &op.data_sha256_hash
-        {
-            self.verify_sha256(data, hash)
-                .context("input verification failed")?;
+        if !self.cmd.no_verify {
+            if let Some(hash) = &op.data_sha256_hash {
+                self.verify_sha256(&*data, hash).context("hash mismatch")?;
+            }
         }
         Ok(data)
     }
@@ -1528,6 +1584,17 @@ impl<'a> Extractor<'a> {
             "Total extracted size: {}",
             indicatif::HumanBytes(total_size)
         );
+        
+        // print Network Bytes if anywere downloaded
+        let net_bytes = crate::remote::NETWORK_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
+        if net_bytes > 0 {
+            let bold_cyan = Style::new().bold().cyan();
+            println!(
+                "Total downloaded size: {}",
+                bold_cyan.apply_to(indicatif::HumanBytes(net_bytes as u64))
+            );
+        }
+
         let bold_bright_blue = Style::new().bold().blue();
         println!(
             "Tool Source: {}",
