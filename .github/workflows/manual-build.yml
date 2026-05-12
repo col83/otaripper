@@ -77,20 +77,19 @@ jobs:
           strip target/${{ matrix.target }}/release/${BIN_NAME}-full || true
           strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}-full pkg/${BIN_NAME}
-          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/${BIN_NAME}-lite
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/${{ matrix.target }}/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
           
-          tar -czf "$NAME.tar.gz" -C pkg .
-          sha256sum "$NAME.tar.gz" > "$NAME.sha256"
+          # hash only the binaries
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.tar.gz
-            *.sha256
+          path: dist/
 
 # =========================
 # Windows Builds
@@ -131,20 +130,18 @@ jobs:
         run: |
           NAME="${BIN_NAME}-${{ matrix.outname }}"
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}-full.exe pkg/${BIN_NAME}.exe
-          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/${BIN_NAME}-lite.exe
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full.exe "dist/$NAME/${BIN_NAME}.exe"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe "dist/$NAME/${BIN_NAME}-lite.exe"
+          cp README.md LICENSE "dist/$NAME/"
           
-          7z a "$NAME.zip" ./pkg/*
-          sha256sum "$NAME.zip" > "$NAME.sha256"
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}.exe" "${BIN_NAME}-lite.exe" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.zip
-            *.sha256
+          path: dist/
 
 # =========================
 # macOS Builds
@@ -185,20 +182,18 @@ jobs:
           strip target/${{ matrix.target }}/release/${BIN_NAME}-full || true
           strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}-full pkg/${BIN_NAME}
-          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/${BIN_NAME}-lite
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/${{ matrix.target }}/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
           
-          tar -czf "$NAME.tar.gz" -C pkg .
-          shasum -a 256 "$NAME.tar.gz" > "$NAME.sha256"
+          cd "dist/$NAME"
+          shasum -a 256 "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.tar.gz
-            *.sha256
+          path: dist/
 
 # =========================
 # Android (ARM64)
@@ -250,17 +245,15 @@ jobs:
           llvm-strip target/aarch64-linux-android/release/${BIN_NAME}-full || true
           llvm-strip target/aarch64-linux-android/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/aarch64-linux-android/release/${BIN_NAME}-full pkg/${BIN_NAME}
-          cp target/aarch64-linux-android/release/${BIN_NAME} pkg/${BIN_NAME}-lite
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/aarch64-linux-android/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/aarch64-linux-android/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
           
-          zip -j "$NAME.zip" pkg/*
-          sha256sum "$NAME.zip" > "$NAME.sha256"
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: android-arm64
-          path: |
-            *.zip
-            *.sha256
+          path: dist/

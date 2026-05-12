@@ -45,6 +45,8 @@ jobs:
   linux-matrix:
     runs-on: ubuntu-latest
     needs: version-check
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -107,20 +109,32 @@ jobs:
           strip target/${{ matrix.target }}/release/${BIN_NAME}-full || true
           strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}-full pkg/${BIN_NAME}
-          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/${BIN_NAME}-lite
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/${{ matrix.target }}/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
           
-          tar -czf "$NAME.tar.gz" -C pkg .
-          sha256sum "$NAME.tar.gz" > "$NAME.sha256"
+          # Internal Checksum (Binaries only)
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
+          cd ../..
+
+          tar -czf "$NAME.tar.gz" -C "dist/$NAME" .
+          sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
+          path: dist/
+
+      - name: Stage Assets to Draft Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
             *.tar.gz
-            *.sha256
+            *.tar.gz.sha256
 
 # =========================
 # Windows Builds
@@ -128,6 +142,8 @@ jobs:
   windows-matrix:
     runs-on: windows-latest
     needs: version-check
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -163,20 +179,31 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           NAME="${BIN_NAME}-${VERSION}-${{ matrix.outname }}"
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}-full.exe pkg/${BIN_NAME}.exe
-          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/${BIN_NAME}-lite.exe
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full.exe "dist/$NAME/${BIN_NAME}.exe"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe "dist/$NAME/${BIN_NAME}-lite.exe"
+          cp README.md LICENSE "dist/$NAME/"
           
-          7z a "$NAME.zip" ./pkg/*
-          sha256sum "$NAME.zip" > "$NAME.sha256"
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}.exe" "${BIN_NAME}-lite.exe" > "${NAME}.sha256"
+          cd ../..
+
+          7z a "$NAME.zip" "./dist/$NAME/*"
+          sha256sum "$NAME.zip" > "$NAME.zip.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
+          path: dist/
+
+      - name: Stage Assets to Draft Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
             *.zip
-            *.sha256
+            *.zip.sha256
 
 # =========================
 # macOS Builds
@@ -184,6 +211,8 @@ jobs:
   macos-matrix:
     runs-on: macos-latest
     needs: version-check
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -219,20 +248,31 @@ jobs:
           strip target/${{ matrix.target }}/release/${BIN_NAME}-full || true
           strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}-full pkg/${BIN_NAME}
-          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/${BIN_NAME}-lite
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/${{ matrix.target }}/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
           
-          tar -czf "$NAME.tar.gz" -C pkg .
-          shasum -a 256 "$NAME.tar.gz" > "$NAME.sha256"
+          cd "dist/$NAME"
+          shasum -a 256 "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
+          cd ../..
+
+          tar -czf "$NAME.tar.gz" -C "dist/$NAME" .
+          shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
+          path: dist/
+
+      - name: Stage Assets to Draft Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
             *.tar.gz
-            *.sha256
+            *.tar.gz.sha256
 
 # =========================
 # Android (ARM64)
@@ -240,6 +280,8 @@ jobs:
   android-arm64:
     runs-on: ubuntu-latest
     needs: version-check
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
@@ -286,42 +328,71 @@ jobs:
           llvm-strip target/aarch64-linux-android/release/${BIN_NAME}-full || true
           llvm-strip target/aarch64-linux-android/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/aarch64-linux-android/release/${BIN_NAME}-full pkg/${BIN_NAME}
-          cp target/aarch64-linux-android/release/${BIN_NAME} pkg/${BIN_NAME}-lite
-          cp README.md LICENSE pkg/
+          mkdir -p "dist/$NAME"
+          cp target/aarch64-linux-android/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/aarch64-linux-android/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
           
-          zip -j "$NAME.zip" pkg/*
-          sha256sum "$NAME.zip" > "$NAME.sha256"
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
+          cd ../..
+
+          zip -j "$NAME.zip" dist/$NAME/*
+          sha256sum "$NAME.zip" > "$NAME.zip.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: android-arm64
-          path: |
+          path: dist/
+
+      - name: Stage Assets to Draft Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
             *.zip
-            *.sha256
+            *.zip.sha256
 
 # =========================
 # GitHub Release
 # =========================
   release:
+    name: Finalize Release
     runs-on: ubuntu-latest
     needs: [linux-matrix, windows-matrix, macos-matrix, android-arm64]
     permissions:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-
-      - name: Publish Release
+      - name: Publish Draft Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "otaripper ${{ github.ref_name }}"
+          draft: false
           generate_release_notes: true
-          files: artifacts/**/*
+
+# =========================
+# Cleanup on Failure
+# =========================
+  cleanup:
+    name: Cleanup on Failure
+    runs-on: ubuntu-latest
+    # this runs only if one of the build jobs fails
+    needs: [linux-matrix, windows-matrix, macos-matrix, android-arm64]
+    if: always() && contains(needs.*.result, 'failure')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Delete Draft Release and Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Build failed, Cleaning up ${{ github.ref_name }}..."
+          gh release delete "${{ github.ref_name }}" --repo "${{ github.repository }}" --yes || echo "No draft release found to delete!"
+          git push --delete origin "${{ github.ref_name }}" || echo "No tag found to delete!"
 
 
 
