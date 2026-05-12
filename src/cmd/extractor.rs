@@ -1230,22 +1230,39 @@ impl<'a> Extractor<'a> {
             {
                 let client = reqwest::blocking::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
+                    .tcp_nodelay(true)
                     .build()
                     .context("Failed to build HTTP client")?;
 
-                let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str)?;
+                // Initialize a spinner for the initial setup phase
+                let spinner = indicatif::ProgressBar::new_spinner();
+                spinner.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap()
+                );
+                spinner.enable_steady_tick(std::time::Duration::from_millis(69));
+
+                let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str, &spinner)?;
+                
+                // revert to a simple spinner for parsing (exact bytes are unknown here)
+                spinner.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap()
+                );
+                spinner.set_message("Parsing remote payload metadata...");
+
                 let mut magic = [0u8; 4];
                 reader.read_exact(&mut magic).context("Failed to read remote header")?;
                 reader.seek(std::io::SeekFrom::Start(0))?;
 
                 let mut base_offset = 0;
                 if &magic == b"PK\x03\x04" {
+                    spinner.set_message("Locating payload.bin inside remote ZIP...");
                     let mut archive = ZipArchive::new(&mut reader)?;
                     let zipfile = archive.by_name("payload.bin")
                         .context("Your ZIP URL does not contain payload.bin")?;
                     base_offset = zipfile.data_start().context("Failed to find data_start inside ZIP URL")?;
                 }
 
+                spinner.set_message("Reading payload headers...");
                 reader.seek(std::io::SeekFrom::Start(base_offset))?;
                 let mut header = [0u8; 24];
                 reader.read_exact(&mut header)?;
@@ -1266,9 +1283,28 @@ impl<'a> Extractor<'a> {
                 } else { (20, 0) };
                 
                 let total_metadata_size = header_size + manifest_size as usize + sig_size;
-                let mut manifest_buf = vec![0u8; total_metadata_size];
-                reader.seek(std::io::SeekFrom::Start(base_offset))?;
-                reader.read_exact(&mut manifest_buf)?;
+
+                // change the spinner into a real little progress bar for the manifest download!
+                spinner.set_length(total_metadata_size as u64);
+                spinner.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
+                        .unwrap()
+                        .progress_chars("=> ")
+                );
+                spinner.set_message("Downloading Android manifest...");
+
+                // fetch the manifest in one fast, persistent connection
+                let manifest_buf = crate::remote::fetch_http_chunk(
+                    &client,
+                    path_str,
+                    base_offset,
+                    total_metadata_size,
+                    &spinner,
+                    total_metadata_size
+                )?;
+                
+                // vanish the initialization spinner entirely so the normal extraction bars can cleanly show up
+                spinner.finish_and_clear();
                 
                 return Ok(PayloadSource::Remote {
                     manifest_buf, url: path_str.to_string(), payload_base_offset: base_offset, client

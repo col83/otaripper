@@ -1,10 +1,10 @@
 use anyhow::{bail, Context};
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_RETRIES: usize = 10;
-const CHUNK_SIZE: usize = 64 * 1024; // 64KB network reads
 const CACHE_SIZE: u64 = 256 * 1024;  // 256KB head/tail ZIP pre fetch
 
 // global bandwidth tracker (shows exactly how much data we saved the user)
@@ -24,16 +24,52 @@ pub fn fetch_http_chunk(
     if size == 0 {
         return Ok(Vec::new());
     }
-    let end = start + size as u64 - 1;
     let mut buf = vec![0u8; size];
-    
-    let mut total_read = 0;
-    let mut ui_reported = 0u64;
-
-    // how much bigger is the uncompressed data vs the network chunk?
     let ratio = if size > 0 { total_dst_size as f64 / size as f64 } else { 1.0 };
 
+    // Parallel chunking For heavy payloads, we split the single HTTP request into
+    // multiple 8MB parallel Range requests to saturate the bandwidth!
+    let part_size = 8 * 1024 * 1024;
+
+    if size > part_size {
+        let results: Vec<anyhow::Result<()>> = buf
+            .par_chunks_mut(part_size)
+            .enumerate()
+            .map(|(i, chunk_slice)| {
+                let chunk_start = start + (i *part_size) as u64;
+                let chunk_end = chunk_start + chunk_slice.len() as u64 - 1;
+                fetch_range_with_retries(client, url, chunk_start, chunk_end, chunk_slice, pb, ratio)
+            })
+            .collect();
+        
+        for res in results {
+            res?;
+        }
+    } else {
+        // normal fast path for smaller operations like where the overhead of parallelism isn't worth it
+        fetch_range_with_retries(client, url, start, start+ size as u64 - 1, &mut buf, pb, ratio)?;
+    }
+
+    Ok(buf)
+}
+
+fn fetch_range_with_retries(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    start: u64,
+    end: u64,
+    buf: &mut [u8],
+    pb: &ProgressBar,
+    ratio: f64,
+) -> anyhow::Result<()> {
+    let size = buf.len();
+    let mut total_read = 0;
+    let mut ui_reported = 0u64;
     let mut attempts = 0;
+    
+    // massive fr 256KB read buffer to prevent loop/syscall overhead
+    let mut chunk = vec![0u8; 256 * 1024];
+
     while total_read < size {
         attempts += 1;
         let req_start = start + total_read as u64;
@@ -47,8 +83,6 @@ pub fn fetch_http_chunk(
                 } else if !resp.status().is_success() {
                     if attempts >= MAX_RETRIES { bail!("Server rejected range request: {}", resp.status()); }
                 } else {
-                    let mut chunk = [0u8; CHUNK_SIZE];
-                    
                     loop {
                         let n = match resp.read(&mut chunk) {
                             Ok(0) => break, // EOF
@@ -85,12 +119,7 @@ pub fn fetch_http_chunk(
         // give the connection a breather
         if total_read < size { std::thread::sleep(std::time::Duration::from_millis(500)); }
     }
-
-    // Snap the UI to the exact destination size to avoid 99% hanging
-    let diff = (total_dst_size as u64).saturating_sub(ui_reported);
-    if diff > 0 { pb.inc(diff); }
-
-    Ok(buf)
+    Ok(())
 }
 
 /// instant start HTTP reader, that pre-fetches the head and tail of the remote ZIP
@@ -105,7 +134,8 @@ pub struct CachingHttpReader {
 }
 
 impl CachingHttpReader {
-    pub fn new(client: reqwest::blocking::Client, url: &str) -> anyhow::Result<Self> {
+    pub fn new(client: reqwest::blocking::Client, url: &str, pb: &ProgressBar) -> anyhow::Result<Self> {
+        pb.set_message("Connecting to remote server...");
         let resp = client.head(url).send()?;
         if !resp.status().is_success() {
             bail!("Failed to access URL: {}", resp.status());
@@ -117,36 +147,66 @@ impl CachingHttpReader {
             .and_then(|v| v.parse::<u64>().ok())
             .context("Server didn't return Content-Length, can't seek this remote file.")?;
 
-        // first, Snag the Payload headers (Head)
         let head_size = CACHE_SIZE.min(length);
-        let mut head_buf = Vec::new();
+        let tail_size = CACHE_SIZE.min(length);
+        let tail_start = length.saturating_sub(tail_size).max(head_size);
+
+        // upgrade the spinner to show realtime byte progress (makes it feel more responsive)
+        pb.set_length(head_size + tail_size);
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan.bold} {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
+                .unwrap()
+                .progress_chars("=> ")
+        );
+
+        // first, Snag the Payload headers (Head)
+        pb.set_message("Fetching headers...");
+        let mut head_buf = Vec::with_capacity(head_size as usize);
         if head_size > 0 {
             let mut req = client.get(url).header("Range", format!("bytes=0-{}", head_size - 1)).send()?;
             if req.status() == reqwest::StatusCode::OK {
                 bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
             } else if req.status().is_success() {
-                if let Ok(n) = req.read_to_end(&mut head_buf) {
+                let mut chunk = vec![0u8; 128 * 1024]; // 128kb burst read
+                loop {
+                    let n = match req.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    head_buf.extend_from_slice(&chunk[..n]);
                     NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                    pb.inc(n as u64);
                 }
             }
         }
 
         // second, Snag the Zip Central Directory (Tail)
-        let tail_size = CACHE_SIZE.min(length);
-        let tail_start = length.saturating_sub(tail_size).max(head_buf.len() as u64);
-        let mut tail_buf = Vec::new();
+        pb.set_message("Fetching ZIP directory...");
+        let mut tail_buf = Vec::with_capacity(tail_size as usize);
         if tail_start < length {
             let mut req = client.get(url).header("Range", format!("bytes={}-{}", tail_start, length - 1)).send()?;
             if req.status() == reqwest::StatusCode::OK {
                 bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
             } else if req.status().is_success() {
-                if let Ok(n) = req.read_to_end(&mut tail_buf) {
+                let mut chunk = vec![0u8; 128 * 1024];
+                loop {
+                    let n = match req.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    tail_buf.extend_from_slice(&chunk[..n]);
                     NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                    pb.inc(n as u64);
                 }
             }
         }
 
-        Ok(Self { client, url: url.to_string(), length, pos: 0, head_buf, tail_buf, tail_start })
+        // Snap tail_start down if head buffer was actually smaller than we think
+        let actual_tail_start = length.saturating_sub(tail_size).max(head_buf.len() as u64);
+
+        Ok(Self { client, url: url.to_string(), length, pos: 0, head_buf, tail_buf, tail_start: actual_tail_start })
     }
 }
 
