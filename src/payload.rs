@@ -8,6 +8,7 @@ const SUPPORTED_VERSION_MAX: u64 = 2;
 #[derive(Debug)]
 pub enum PayloadData<'a> {
     Local(&'a [u8]),
+    #[cfg(feature = "remote")]
     Remote {
         url: String,
         data_offset: u64,
@@ -133,6 +134,7 @@ impl<'a> Payload<'a> {
         })
     }
 
+    #[cfg(feature = "remote")]
     pub fn parse_remote(
         manifest_buf: &'a [u8],
         url: String,

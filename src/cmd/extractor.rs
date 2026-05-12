@@ -49,6 +49,7 @@ pub enum PayloadSource {
     MappedOffset(Mmap, usize),
     Owned(Vec<u8>),
     Temp(Mmap, NamedTempFile),
+    #[cfg(feature = "remote")]
     Remote {
         manifest_buf: Vec<u8>,
         url: String,
@@ -244,6 +245,7 @@ impl<'a> Extractor<'a> {
 
         let payload_source = self.open_payload_file(payload_path_str)?;
         let payload_parsed = match &payload_source {
+            #[cfg(feature = "remote")]
             PayloadSource::Remote { manifest_buf, url, payload_base_offset, client } => {
                 Payload::parse_remote(manifest_buf, url.clone(), *payload_base_offset, client.clone())?
             }
@@ -253,7 +255,8 @@ impl<'a> Extractor<'a> {
                     PayloadSource::MappedOffset(m, offset) => &m[*offset..],
                     PayloadSource::Owned(v) => v,
                     PayloadSource::Temp(m, _) => m,
-                    _ => unreachable!(),
+                    #[cfg(feature = "remote")]
+                    PayloadSource::Remote { .. } => unreachable!(),
                 };
                 Payload::parse(bytes)?
             }
@@ -1223,51 +1226,62 @@ impl<'a> Extractor<'a> {
 
         // HTTP remote reader logic here
         if path_str.starts_with("http://") || path_str.starts_with("https://") {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .context("Failed to build HTTP client")?;
+            #[cfg(feature = "remote")]
+            {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .context("Failed to build HTTP client")?;
 
-            let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str)?;
-            let mut magic = [0u8; 4];
-            reader.read_exact(&mut magic).context("Failed to read remote header")?;
-            reader.seek(std::io::SeekFrom::Start(0))?;
+                let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str)?;
+                let mut magic = [0u8; 4];
+                reader.read_exact(&mut magic).context("Failed to read remote header")?;
+                reader.seek(std::io::SeekFrom::Start(0))?;
 
-            let mut base_offset = 0;
-            if &magic == b"PK\x03\x04" {
-                let mut archive = ZipArchive::new(&mut reader)?;
-                let zipfile = archive.by_name("payload.bin")
-                    .context("Your ZIP URL does not contain payload.bin")?;
-                base_offset = zipfile.data_start().context("Failed to find data_start inside ZIP URL")?;
+                let mut base_offset = 0;
+                if &magic == b"PK\x03\x04" {
+                    let mut archive = ZipArchive::new(&mut reader)?;
+                    let zipfile = archive.by_name("payload.bin")
+                        .context("Your ZIP URL does not contain payload.bin")?;
+                    base_offset = zipfile.data_start().context("Failed to find data_start inside ZIP URL")?;
+                }
+
+                reader.seek(std::io::SeekFrom::Start(base_offset))?;
+                let mut header = [0u8; 24];
+                reader.read_exact(&mut header)?;
+                
+                let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
+                let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
+                
+                // prevent exabyte OOM panics from malicious servers sending garbage data
+                // max manifest size is 256MB, anything larger is mathematically a rogue server
+                anyhow::ensure!(
+                    manifest_size <= 256 * 1024 * 1024,
+                    "Server sent impossible manifest size ({} bytes), The connection is corrupt or malicious!",
+                    manifest_size
+                );
+
+                let (header_size, sig_size) = if file_format_version >= 2 {
+                    (24, u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize)
+                } else { (20, 0) };
+                
+                let total_metadata_size = header_size + manifest_size as usize + sig_size;
+                let mut manifest_buf = vec![0u8; total_metadata_size];
+                reader.seek(std::io::SeekFrom::Start(base_offset))?;
+                reader.read_exact(&mut manifest_buf)?;
+                
+                return Ok(PayloadSource::Remote {
+                    manifest_buf, url: path_str.to_string(), payload_base_offset: base_offset, client
+                });
             }
 
-            reader.seek(std::io::SeekFrom::Start(base_offset))?;
-            let mut header = [0u8; 24];
-            reader.read_exact(&mut header)?;
-            
-            let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
-            let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
-            
-            // prevent exabyte OOM panics from malicious servers sending garbage data
-            // max manifest size is 256MB, anything larger is mathematically a rogue server
-            anyhow::ensure!(
-                manifest_size <= 256 * 1024 * 1024,
-                "Server sent impossible manifest size ({} bytes), The connection is corrupt or malicious!",
-                manifest_size
-            );
-
-            let (header_size, sig_size) = if file_format_version >= 2 {
-                (24, u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize)
-            } else { (20, 0) };
-            
-            let total_metadata_size = header_size + manifest_size as usize + sig_size;
-            let mut manifest_buf = vec![0u8; total_metadata_size];
-            reader.seek(std::io::SeekFrom::Start(base_offset))?;
-            reader.read_exact(&mut manifest_buf)?;
-            
-            return Ok(PayloadSource::Remote {
-                manifest_buf, url: path_str.to_string(), payload_base_offset: base_offset, client
-            });
+            #[cfg(not(feature = "remote"))]
+            {
+                anyhow::bail!(
+                    "HTTP streaming is disabled! as this is a Lite build to save binary space\n\
+                    To extract directly from URL, please use the full version of otaripper."
+                );
+            }
         }
 
         let path = Path::new(path_str);
@@ -1429,6 +1443,7 @@ impl<'a> Extractor<'a> {
         Ok((partition, partition_len as usize, path))
     }
 
+    #[allow(unused_variables)]
     fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload, pb: &ProgressBar, total_dst_size: usize,) -> Result<std::borrow::Cow<'b, [u8]>> {
         let data_len = op.data_length.context("data_length not defined")? as usize;
         let offset = op.data_offset.context("data_offset not defined")? as usize;
@@ -1447,6 +1462,7 @@ impl<'a> Extractor<'a> {
                 );
                 std::borrow::Cow::Borrowed(&local_slice[offset..end_offset])
             },
+            #[cfg(feature = "remote")]
             crate::payload::PayloadData::Remote { url, data_offset, client } => {
                 let start = data_offset + offset as u64;
                 let buf = crate::remote::fetch_http_chunk(client, url, start, data_len, pb, total_dst_size)?;
@@ -1611,13 +1627,16 @@ impl<'a> Extractor<'a> {
         );
         
         // print Network Bytes if anywere downloaded
-        let net_bytes = crate::remote::NETWORK_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
-        if net_bytes > 0 {
-            let bold_cyan = Style::new().bold().cyan();
-            println!(
-                "Total downloaded size: {}",
-                bold_cyan.apply_to(indicatif::HumanBytes(net_bytes as u64))
-            );
+        #[cfg(feature = "remote")]
+        {
+            let net_bytes = crate::remote::NETWORK_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
+            if net_bytes > 0 {
+                let bold_cyan = Style::new().bold().cyan();
+                println!(
+                    "Total downloaded size: {}",
+                    bold_cyan.apply_to(indicatif::HumanBytes(net_bytes as u64))
+                );
+            }
         }
 
         let bold_bright_blue = Style::new().bold().blue();
