@@ -1228,9 +1228,22 @@ impl<'a> Extractor<'a> {
         if path_str.starts_with("http://") || path_str.starts_with("https://") {
             #[cfg(feature = "remote")]
             {
+                // safely detect if we are on Android or not
+                // we will check for build.prop (Android) and resolv.conf (Linux)
+                let is_android = std::path::Path::new("/system/build.prop").exists();
+                let has_resolv_conf = std::path::Path::new("/etc/resolv.conf").exists();
+                
+                // compile time detect Windows (which lacks resolv.conf but should use Hickory)
+                let is_windows = cfg!(target_os = "windows");
+                
+                // Only use Hickory if we are NOT on Android, and we either have resolv.conf or we are on Windows
+                let use_hickory = !is_android && (has_resolv_conf || is_windows);
+
                 let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .pool_max_idle_per_host(32)
                     .tcp_nodelay(true)
+                    .hickory_dns(use_hickory)
                     .build()
                     .context("Failed to build HTTP client")?;
 
