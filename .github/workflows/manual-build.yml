@@ -61,27 +61,35 @@ jobs:
           AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
           EOF
 
-      - name: Build
+      - name: Build Full
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Lite
+        run: |
+          cp target/${{ matrix.target }}/release/${BIN_NAME} target/${{ matrix.target }}/release/${BIN_NAME}-full
+          cargo build --release --target ${{ matrix.target }} --no-default-features
 
       - name: Package
         shell: bash
         run: |
           NAME="${BIN_NAME}-${{ matrix.outname }}"
 
+          strip target/${{ matrix.target }}/release/${BIN_NAME}-full || true
           strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME} README.md LICENSE pkg/
-          tar -czf "$NAME.tar.gz" -C pkg .
-          sha256sum "$NAME.tar.gz" > "$NAME.sha256"
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/${{ matrix.target }}/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
+          
+          # hash only the binaries
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.tar.gz
-            *.sha256
+          path: dist/
 
 # =========================
 # Windows Builds
@@ -108,25 +116,32 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
+      - name: Build Full
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Lite
+        shell: bash
+        run: |
+          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe target/${{ matrix.target }}/release/${BIN_NAME}-full.exe
+          cargo build --release --target ${{ matrix.target }} --no-default-features
 
       - name: Package
         shell: bash
         run: |
           NAME="${BIN_NAME}-${{ matrix.outname }}"
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe README.md LICENSE pkg/
-          7z a "$NAME.zip" ./pkg/*
-          sha256sum "$NAME.zip" > "$NAME.sha256"
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full.exe "dist/$NAME/${BIN_NAME}.exe"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe "dist/$NAME/${BIN_NAME}-lite.exe"
+          cp README.md LICENSE "dist/$NAME/"
+          
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}.exe" "${BIN_NAME}-lite.exe" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.zip
-            *.sha256
+          path: dist/
 
 # =========================
 # macOS Builds
@@ -152,26 +167,33 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
+      - name: Build Full
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Lite
+        run: |
+          cp target/${{ matrix.target }}/release/${BIN_NAME} target/${{ matrix.target }}/release/${BIN_NAME}-full
+          cargo build --release --target ${{ matrix.target }} --no-default-features
 
       - name: Package
         run: |
           NAME="${BIN_NAME}-${{ matrix.outname }}"
 
+          strip target/${{ matrix.target }}/release/${BIN_NAME}-full || true
           strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/${{ matrix.target }}/release/${BIN_NAME} README.md LICENSE pkg/
-          tar -czf "$NAME.tar.gz" -C pkg .
-          shasum -a 256 "$NAME.tar.gz" > "$NAME.sha256"
+          mkdir -p "dist/$NAME"
+          cp target/${{ matrix.target }}/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/${{ matrix.target }}/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
+          
+          cd "dist/$NAME"
+          shasum -a 256 "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.tar.gz
-            *.sha256
+          path: dist/
 
 # =========================
 # Android (ARM64)
@@ -196,7 +218,7 @@ jobs:
           ndk-version: r26d
         id: ndk
 
-      - name: Build Android
+      - name: Build Full Android
         run: |
           TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
@@ -205,20 +227,33 @@ jobs:
 
           cargo build --release --target aarch64-linux-android
 
+      - name: Build Lite Android
+        run: |
+          cp target/aarch64-linux-android/release/${BIN_NAME} target/aarch64-linux-android/release/${BIN_NAME}-full
+          
+          TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
+
+          cargo build --release --target aarch64-linux-android --no-default-features
+
       - name: Package
         run: |
           NAME="${BIN_NAME}-android-arm64"
 
+          llvm-strip target/aarch64-linux-android/release/${BIN_NAME}-full || true
           llvm-strip target/aarch64-linux-android/release/${BIN_NAME} || true
 
-          mkdir pkg
-          cp target/aarch64-linux-android/release/${BIN_NAME} README.md LICENSE pkg/
-          zip -j "$NAME.zip" pkg/*
-          sha256sum "$NAME.zip" > "$NAME.sha256"
+          mkdir -p "dist/$NAME"
+          cp target/aarch64-linux-android/release/${BIN_NAME}-full "dist/$NAME/${BIN_NAME}"
+          cp target/aarch64-linux-android/release/${BIN_NAME} "dist/$NAME/${BIN_NAME}-lite"
+          cp README.md LICENSE "dist/$NAME/"
+          
+          cd "dist/$NAME"
+          sha256sum "${BIN_NAME}" "${BIN_NAME}-lite" > "${NAME}.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: android-arm64
-          path: |
-            *.zip
-            *.sha256
+          path: dist/

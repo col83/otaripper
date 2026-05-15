@@ -78,25 +78,31 @@ else {
 Write-Host "Fetching dependencies (locked)..."
 cargo fetch --locked
 
-Write-Host "Building (release, CPU=native)..."
+Write-Host "Building Full version (release, CPU=native)..."
 
 $oldRustFlags = $env:RUSTFLAGS
 $env:RUSTFLAGS = "-C target-cpu=native"
 
 cargo build --release --locked
+$BIN = "target\release\otaripper.exe"
+if (-not (Test-Path $BIN)) {
+    Write-Host "ERROR: Full build failed."
+    exit 1
+}
+Copy-Item $BIN "$OUTDIR\otaripper.exe" -Force
+
+Write-Host "Building Lite version (no HTTP streaming)..."
+cargo build --release --locked --no-default-features
+if (-not (Test-Path $BIN)) {
+    Write-Host "ERROR: Lite build failed."
+    exit 1
+}
+Copy-Item $BIN "$OUTDIR\otaripper-lite.exe" -Force
 
 $env:RUSTFLAGS = $oldRustFlags
 
 # Cleanup
 Write-Host "Finalizing..."
-
-$BIN = "target\release\otaripper.exe"
-if (-not (Test-Path $BIN)) {
-    Write-Host "ERROR: Build failed. Binary not found."
-    exit 1
-}
-
-Copy-Item $BIN $OUTDIR -Force
 
 Set-Location $BASE_DIR
 Remove-Item -Recurse -Force $WORKDIR

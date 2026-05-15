@@ -21,7 +21,6 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
-use std::ops::Deref;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -50,6 +49,13 @@ pub enum PayloadSource {
     MappedOffset(Mmap, usize),
     Owned(Vec<u8>),
     Temp(Mmap, NamedTempFile),
+    #[cfg(feature = "remote")]
+    Remote {
+        manifest_buf: Vec<u8>,
+        url: String,
+        payload_base_offset: u64,
+        client: reqwest::blocking::Client,
+    },
 }
 
 #[repr(transparent)]
@@ -95,18 +101,6 @@ struct WorkerContext {
     first_error: Arc<Mutex<Option<anyhow::Error>>>,
     remaining_ops: Arc<AtomicUsize>,
     partition_len: usize,
-}
-
-impl Deref for PayloadSource {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        match self {
-            PayloadSource::Mapped(mmap) => mmap,
-            PayloadSource::MappedOffset(mmap, offset) => &mmap[*offset..],
-            PayloadSource::Owned(vec) => vec,
-            PayloadSource::Temp(mmap, _) => mmap,
-        }
-    }
 }
 
 pub(super) struct Extractor<'a> {
@@ -217,14 +211,20 @@ impl<'a> Extractor<'a> {
 
         let payload_path = self.cmd.positional_payload.as_ref()
             .ok_or_else(|| anyhow::anyhow!(
-                "No payload file specified.\n\
+                "No payload file or URL specified.\n\
         \n\
         Usage:\n\
-          otaripper <payload.zip | payload.bin>\n\
+          otaripper <payload.zip | payload.bin | HTTP URL>\n\
           otaripper arbscan <xbl_config.img>\n\
         \n\
         Examples:\n\
-          • Extract everything:\n\
+          • Stream an entire OTA directly from a URL:\n\
+              otaripper https://example.com/rom.zip\n\
+        \n\
+          • Stream only specific partitions from a URL (massive bandwidth W):\n\
+              otaripper https://example.com/rom.zip -p boot,init_boot\n\
+        \n\
+          • Extract a local file:\n\
               otaripper update.zip\n\
         \n\
           • Extract only specific partitions:\n\
@@ -241,10 +241,27 @@ impl<'a> Extractor<'a> {
             ))?
             .clone();
 
-        // Proceed with the rest of the method using payload_path
-        let payload = self.open_payload_file(&payload_path)?;
-        // Because PayloadSource implements Deref, this call works seamlessly.
-        let payload = &Payload::parse(&payload)?;
+        let payload_path_str = payload_path.to_str().context("Path is not valid UTF-8")?;
+
+        let payload_source = self.open_payload_file(payload_path_str)?;
+        let payload_parsed = match &payload_source {
+            #[cfg(feature = "remote")]
+            PayloadSource::Remote { manifest_buf, url, payload_base_offset, client } => {
+                Payload::parse_remote(manifest_buf, url.clone(), *payload_base_offset, client.clone())?
+            }
+            local_source => {
+                let bytes: &[u8] = match local_source {
+                    PayloadSource::Mapped(m) => m,
+                    PayloadSource::MappedOffset(m, offset) => &m[*offset..],
+                    PayloadSource::Owned(v) => v,
+                    PayloadSource::Temp(m, _) => m,
+                    #[cfg(feature = "remote")]
+                    PayloadSource::Remote { .. } => unreachable!(),
+                };
+                Payload::parse(bytes)?
+            }
+        };
+        let payload = &payload_parsed;
 
         let mut manifest =
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
@@ -504,7 +521,17 @@ impl<'a> Extractor<'a> {
 
         // Set up panic hook to trigger cleanup on any thread panic
         let cleanup_state_clone = Arc::clone(&cleanup_state);
-        std::panic::set_hook(Box::new(move |_panic_info| {
+        std::panic::set_hook(Box::new(move |panic_info| {
+            // extract the actual panic message to tell the user what went wrong
+            let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "Unknown panic"
+            };
+            let location = panic_info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_else(|| "unknown location".to_string());
+            eprintln!("\n FATAL THREAD PANIC at {}: {}", location, msg);
             if let Ok(state) = cleanup_state_clone.lock() {
                 // Try to remove created files
                 for f in &state.files {
@@ -515,7 +542,7 @@ impl<'a> Extractor<'a> {
                     let _ = fs::remove_dir_all(&state.dir);
                 }
                 eprintln!(
-                    "Extraction aborted due to an error. Any partially extracted partition images have been deleted to prevent misuse."
+                    "Extraction aborted cleanly after a fatal error. Any partially extracted partition images have been deleted to prevent misuse."
                 );
             }
         }));
@@ -715,8 +742,9 @@ impl<'a> Extractor<'a> {
                 block_size,
                 &ctx.part_name,
                 simd,
+                &progress_bar,
             ) {
-                Ok(bytes) => progress_bar.inc(bytes as u64),
+                Ok(()) => {},
                 Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                     ctx.cancellation_token.store(true, Ordering::Release);
                     if slot.is_none() {
@@ -762,12 +790,11 @@ impl<'a> Extractor<'a> {
             let ctx = ctx.clone();
 
             scope.spawn(move |_| {
-                let mut chunk_bytes = 0usize;
                 for op in chunk {
                     if ctx.cancellation_token.load(Ordering::Acquire) { return; }
 
-                    match self.run_op_raw(op, payload, base_ptr, ctx.partition_len, block_size, &ctx.part_name, simd) {
-                        Ok(bytes) => chunk_bytes += bytes,
+                    match self.run_op_raw(op, payload, base_ptr, ctx.partition_len, block_size, &ctx.part_name, simd, &pb) {
+                        Ok(()) => {},
                         Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                             ctx.cancellation_token.store(true, Ordering::Release);
                             if slot.is_none() {
@@ -781,10 +808,6 @@ impl<'a> Extractor<'a> {
                             return;
                         }
                     }
-                }
-
-                if chunk_bytes > 0 {
-                    pb.inc(chunk_bytes as u64);
                 }
 
                 if ctx.remaining_ops.fetch_sub(chunk.len(), Ordering::AcqRel) == chunk.len() {
@@ -815,7 +838,7 @@ impl<'a> Extractor<'a> {
             }
         };
         if let Some(err) = error {
-            eprintln!("\n{}", err);
+            eprintln!("\n{:?}", err);
         }
         bail!(
             "❌ Extraction failed due to errors (see above). All partial files have been cleaned up."
@@ -909,7 +932,7 @@ impl<'a> Extractor<'a> {
         .progress_chars("=> ");
 
         Ok(ProgressBar::new(total_bytes)
-            .with_finish(ProgressFinish::AndLeave)
+            .with_finish(ProgressFinish::Abandon) // FREEZE the bar exactly where it crashed
             .with_prefix(update.partition_name.to_string())
             .with_style(style))
     }
@@ -1019,7 +1042,8 @@ impl<'a> Extractor<'a> {
         block_size: usize,
         partition_name: &str,
         simd: CpuSimd,
-    ) -> Result<usize> {
+        pb: &ProgressBar,
+    ) -> Result<()> {
         let op_type = Type::try_from(op.r#type)?;
         let raw_extents =
             self.extract_dst_extents_raw(op, base_ptr.0, partition_len, block_size)?;
@@ -1036,33 +1060,36 @@ impl<'a> Extractor<'a> {
 
         match op_type {
             Type::Replace => {
-                let data = self.extract_data(op, payload)?;
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
                 self.run_op_replace_slice(
-                    data,
+                    &*data,
                     &mut dst_extents,
                     block_size,
                     total_dst_size,
                     simd,
                 )?;
-                Ok(total_dst_size)
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                Ok(())
             }
-
             Type::ReplaceBz => {
-                let data = self.extract_data(op, payload)?;
-                let mut decoder = BzDecoder::new(data);
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
+                let mut decoder = BzDecoder::new(&*data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
-                Ok(total_dst_size)
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                Ok(())
             }
             Type::ReplaceXz => {
-                let data = self.extract_data(op, payload)?;
-                let mut decoder = liblzma::read::XzDecoder::new(data);
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
+                let mut decoder = liblzma::read::XzDecoder::new(&*data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
-                Ok(total_dst_size)
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                Ok(())
             }
             Type::Zero | Type::Discard => {
                 // the OS kernel guarantees new file sectors are strictly zeroed.
                 // we safely bypass user-space filling completely to save disk I/O
-                Ok(total_dst_size)
+                pb.inc(total_dst_size as u64);
+                Ok(())
             }
 
             // Catch-all for incremental types (Bsdiff, Brotli, etc.) or unknown future types
@@ -1193,10 +1220,120 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
-    fn open_payload_file(&self, path: &Path) -> Result<PayloadSource> {
+    fn open_payload_file(&self, path_str: &str) -> Result<PayloadSource> {
         use sysinfo::System;
         use tempfile::NamedTempFile;
 
+        // HTTP remote reader logic here
+        if path_str.starts_with("http://") || path_str.starts_with("https://") {
+            #[cfg(feature = "remote")]
+            {
+                // safely detect if we are on Android or not
+                // we will check for build.prop (Android) and resolv.conf (Linux)
+                let is_android = std::path::Path::new("/system/build.prop").exists();
+                let has_resolv_conf = std::path::Path::new("/etc/resolv.conf").exists();
+                
+                // compile time detect Windows (which lacks resolv.conf but should use Hickory)
+                let is_windows = cfg!(target_os = "windows");
+                
+                // Only use Hickory if we are NOT on Android, and we either have resolv.conf or we are on Windows
+                let use_hickory = !is_android && (has_resolv_conf || is_windows);
+
+                let client = reqwest::blocking::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .pool_max_idle_per_host(32)
+                    .tcp_nodelay(true)
+                    .hickory_dns(use_hickory)
+                    .build()
+                    .context("Failed to build HTTP client")?;
+
+                // Initialize a spinner for the initial setup phase
+                let spinner = indicatif::ProgressBar::new_spinner();
+                spinner.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap()
+                );
+                spinner.enable_steady_tick(std::time::Duration::from_millis(69));
+
+                let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str, &spinner)?;
+                
+                // revert to a simple spinner for parsing (exact bytes are unknown here)
+                spinner.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap()
+                );
+                spinner.set_message("Parsing remote payload metadata...");
+
+                let mut magic = [0u8; 4];
+                reader.read_exact(&mut magic).context("Failed to read remote header")?;
+                reader.seek(std::io::SeekFrom::Start(0))?;
+
+                let mut base_offset = 0;
+                if &magic == b"PK\x03\x04" {
+                    spinner.set_message("Locating payload.bin inside remote ZIP...");
+                    let mut archive = ZipArchive::new(&mut reader)?;
+                    let zipfile = archive.by_name("payload.bin")
+                        .context("Your ZIP URL does not contain payload.bin")?;
+                    base_offset = zipfile.data_start().context("Failed to find data_start inside ZIP URL")?;
+                }
+
+                spinner.set_message("Reading payload headers...");
+                reader.seek(std::io::SeekFrom::Start(base_offset))?;
+                let mut header = [0u8; 24];
+                reader.read_exact(&mut header)?;
+                
+                let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
+                let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
+                
+                // prevent exabyte OOM panics from malicious servers sending garbage data
+                // max manifest size is 256MB, anything larger is mathematically a rogue server
+                anyhow::ensure!(
+                    manifest_size <= 256 * 1024 * 1024,
+                    "Server sent impossible manifest size ({} bytes), The connection is corrupt or malicious!",
+                    manifest_size
+                );
+
+                let (header_size, sig_size) = if file_format_version >= 2 {
+                    (24, u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize)
+                } else { (20, 0) };
+                
+                let total_metadata_size = header_size + manifest_size as usize + sig_size;
+
+                // change the spinner into a real little progress bar for the manifest download!
+                spinner.set_length(total_metadata_size as u64);
+                spinner.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")
+                        .unwrap()
+                        .progress_chars("=> ")
+                );
+                spinner.set_message("Downloading Android manifest...");
+
+                // fetch the manifest in one fast, persistent connection
+                let manifest_buf = crate::remote::fetch_http_chunk(
+                    &client,
+                    path_str,
+                    base_offset,
+                    total_metadata_size,
+                    &spinner,
+                    total_metadata_size
+                )?;
+                
+                // vanish the initialization spinner entirely so the normal extraction bars can cleanly show up
+                spinner.finish_and_clear();
+                
+                return Ok(PayloadSource::Remote {
+                    manifest_buf, url: path_str.to_string(), payload_base_offset: base_offset, client
+                });
+            }
+
+            #[cfg(not(feature = "remote"))]
+            {
+                anyhow::bail!(
+                    "HTTP streaming is disabled! as this is a Lite build to save binary space\n\
+                    To extract directly from URL, please use the full version of otaripper."
+                );
+            }
+        }
+
+        let path = Path::new(path_str);
         // 1. Open the file and peek magic bytes to identify format
         let mut file = File::open(path)
             .with_context(|| format!("unable to open file for reading: {path:?}"))?;
@@ -1355,28 +1492,37 @@ impl<'a> Extractor<'a> {
         Ok((partition, partition_len as usize, path))
     }
 
-    fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload) -> Result<&'b [u8]> {
+    #[allow(unused_variables)]
+    fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload, pb: &ProgressBar, total_dst_size: usize,) -> Result<std::borrow::Cow<'b, [u8]>> {
         let data_len = op.data_length.context("data_length not defined")? as usize;
         let offset = op.data_offset.context("data_offset not defined")? as usize;
 
-        let end_offset = offset
-            .checked_add(data_len)
-            .context("data_offset + data_length overflows")?;
-        ensure!(
-            end_offset <= payload.data.len(),
-            "data range {}..{} exceeds payload size {}",
-            offset,
-            end_offset,
-            payload.data.len()
-        );
+        let data = match &payload.data {
+            crate::payload::PayloadData::Local(local_slice) => {
+                let end_offset = offset
+                    .checked_add(data_len)
+                    .context("data_offset + data_length overflows")?;
+                ensure!(
+                    end_offset <= local_slice.len(),
+                    "data range {}..{} exceeds payload size {}",
+                    offset,
+                    end_offset,
+                    local_slice.len()
+                );
+                std::borrow::Cow::Borrowed(&local_slice[offset..end_offset])
+            },
+            #[cfg(feature = "remote")]
+            crate::payload::PayloadData::Remote { url, data_offset, client } => {
+                let start = data_offset + offset as u64;
+                let buf = crate::remote::fetch_http_chunk(client, url, start, data_len, pb, total_dst_size)?;
+                std::borrow::Cow::Owned(buf)
+            }
+        };
 
-        let data = &payload.data[offset..end_offset];
-
-        if !self.cmd.no_verify
-            && let Some(hash) = &op.data_sha256_hash
-        {
-            self.verify_sha256(data, hash)
-                .context("input verification failed")?;
+        if !self.cmd.no_verify {
+            if let Some(hash) = &op.data_sha256_hash {
+                self.verify_sha256(&*data, hash).context("hash mismatch")?;
+            }
         }
         Ok(data)
     }
@@ -1528,6 +1674,20 @@ impl<'a> Extractor<'a> {
             "Total extracted size: {}",
             indicatif::HumanBytes(total_size)
         );
+        
+        // print Network Bytes if anywere downloaded
+        #[cfg(feature = "remote")]
+        {
+            let net_bytes = crate::remote::NETWORK_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
+            if net_bytes > 0 {
+                let bold_cyan = Style::new().bold().cyan();
+                println!(
+                    "Total downloaded size: {}",
+                    bold_cyan.apply_to(indicatif::HumanBytes(net_bytes as u64))
+                );
+            }
+        }
+
         let bold_bright_blue = Style::new().bold().blue();
         println!(
             "Tool Source: {}",

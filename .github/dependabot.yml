@@ -8,3 +8,6 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+    ignore:
+      - dependency-name: "reqwest"
+        versions: [">= 0.13.0"]

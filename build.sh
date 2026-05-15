@@ -40,13 +40,17 @@ echo "📦 Extracting..."
 unzip -q otaripper.zip
 cd otaripper-*
 
-echo "⚙️  Building (release, CPU=native)..."
+echo "⚙️  Building Full version (release, CPU=native)..."
 export RUSTFLAGS="-C target-cpu=native"
 cargo build --release
+cp target/release/otaripper "$OUTDIR/otaripper"
+
+echo "⚙️  Building Lite version (no HTTP streaming)..."
+cargo build --release --no-default-features
+cp target/release/otaripper "$OUTDIR/otaripper-lite"
 
 # Cleanup
 echo "🧹 Cleaning up..."
-cp target/release/otaripper "$OUTDIR/"
 
 cd "$BASE_DIR"
 rm -rf "$WORKDIR"
