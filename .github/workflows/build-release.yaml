@@ -133,6 +133,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          name: "otaripper ${{ github.ref_name }}"
           draft: true
           files: |
             *.tar.gz
@@ -203,6 +204,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          name: "otaripper ${{ github.ref_name }}"
           draft: true
           files: |
             *.zip
@@ -273,6 +275,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          name: "otaripper ${{ github.ref_name }}"
           draft: true
           files: |
             *.tar.gz
@@ -354,6 +357,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          name: "otaripper ${{ github.ref_name }}"
           draft: true
           files: |
             *.zip
