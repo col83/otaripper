@@ -44,5 +44,5 @@ rustflags = ["-C", "target-cpu=x86-64-v2", "-C", "target-feature=+crt-static"]
 # AR_aarch64_linux_android = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 
 [alias]
-lite = "build --release --no-default-features"
+lite = "build --release --no-default-features --target-dir target/lite"
 full = "build --release"
