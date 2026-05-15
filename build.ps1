@@ -1,11 +1,11 @@
 $ErrorActionPreference = "Stop"
 
-$REPO    = "syedinsaf/otaripper"
+$REPO = "syedinsaf/otaripper"
 $ZIP_URL = "https://github.com/$REPO/archive/refs/heads/main.zip"
 
 $BASE_DIR = $PSScriptRoot
-$WORKDIR  = Join-Path $BASE_DIR "otaripper-native-build"
-$OUTDIR   = Join-Path $BASE_DIR "otaripper-native"
+$WORKDIR = Join-Path $BASE_DIR "otaripper-native-build"
+$OUTDIR = Join-Path $BASE_DIR "otaripper-native"
 
 # Preflight: Rust / Cargo
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -40,8 +40,8 @@ Write-Host "Extracting..."
 Expand-Archive -Path "otaripper.zip" -DestinationPath .
 
 $SRC_DIR = Get-ChildItem -Directory |
-    Where-Object { $_.Name -like "otaripper-*" } |
-    Select-Object -First 1
+Where-Object { $_.Name -like "otaripper-*" } |
+Select-Object -First 1
 
 Set-Location $SRC_DIR.FullName
 
@@ -56,12 +56,12 @@ else {
     $requiredRust = ($msrvLine -split '=')[1].Trim().Trim('"')
     $currentRust = (rustc --version).Split()[1]
 
-    function Normalize-Version($v) {
+    function Format-Version($v) {
         $parts = $v.Split('.')
         return "{0:D3}.{1:D3}.{2:D3}" -f $parts[0], $parts[1], $parts[2]
     }
 
-    if ((Normalize-Version $currentRust) -lt (Normalize-Version $requiredRust)) {
+    if ((Format-Version $currentRust) -lt (Format-Version $requiredRust)) {
         Write-Host ""
         Write-Host "ERROR: Rust version mismatch"
         Write-Host "  Installed Rust : $currentRust"
@@ -90,14 +90,6 @@ if (-not (Test-Path $BIN)) {
     exit 1
 }
 Copy-Item $BIN "$OUTDIR\otaripper.exe" -Force
-
-Write-Host "Building Lite version (no HTTP streaming)..."
-cargo build --release --locked --no-default-features
-if (-not (Test-Path $BIN)) {
-    Write-Host "ERROR: Lite build failed."
-    exit 1
-}
-Copy-Item $BIN "$OUTDIR\otaripper-lite.exe" -Force
 
 $env:RUSTFLAGS = $oldRustFlags
 
