@@ -45,10 +45,6 @@ export RUSTFLAGS="-C target-cpu=native"
 cargo build --release
 cp target/release/otaripper "$OUTDIR/otaripper"
 
-echo "⚙️  Building Lite version (no HTTP streaming)..."
-cargo build --release --no-default-features
-cp target/release/otaripper "$OUTDIR/otaripper-lite"
-
 # Cleanup
 echo "🧹 Cleaning up..."
 
