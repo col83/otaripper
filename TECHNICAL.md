@@ -2,8 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v2.3 Note:**
-> This release introduces zero-copy Zip memory mapping for standard OTA payloads, completely eliminating redundant I/O bottlenecks. It also integrates native `arbscan` support and a modernized ARM64 BCJ decompression backend.
+> **v3.0 Note:**
+> This release perfects Remote HTTP Streaming and introduces zero-copy Zip memory mapping for standard OTA payloads, completely eliminating redundant I/O bottlenecks. It also integrates native `arbscan` support and a modernized ARM64 BCJ decompression backend.
 
 ---
 
@@ -12,12 +12,14 @@ This document provides detailed technical information about **otaripper’s** ar
 * [Architecture Overview](#architecture-overview)
 * [Memory Management](#memory-management)
 * [SIMD Optimization](#simd-optimization)
+* [Remote Extraction Architecture](#remote-extraction-architecture)
 * [Verification Pipeline](#verification-pipeline)
 * [Parallel Extraction](#parallel-extraction)
 * [Reliability and Failure Handling](#reliability-and-failure-handling)
 * [Performance Architecture](#performance-architecture)
 * [Advanced Configuration](#advanced-configuration)
 * [Design Decisions](#design-decisions)
+* [Release Infrastructure](#release-infrastructure)
 * [Future Optimizations](#future-optimizations)
 * [Troubleshooting](#troubleshooting)
 * [References](#references)
@@ -207,6 +209,23 @@ Outputs detected SIMD capabilities and the selected execution path.
 
 ---
 
+## Remote Extraction Architecture
+
+otaripper's remote HTTP extraction engine (`--remote`) is highly tuned to bypass OS-specific networking quirks while maintaining absolute reliability across varied native environments.
+
+### Dynamic DNS Resolution
+
+1. **Linux / Windows (`hickory-dns`)**
+   On statically-linked Linux (`musl`) and Windows, otaripper uses the pure-Rust `hickory-dns` resolver. This explicitly bypasses a known bug in `musl libc` where cold HTTP connections were unexpectedly dropped due to strict native timeout handling.
+2. **Android CLI (Native Resolver Fallback)**
+   On Android, the pure-Rust resolver is disabled via a dynamic `/system/build.prop` existence check. This forces otaripper to use Android's native OS resolver. This fallback is critical for preventing crashes on custom ROMs with broken or missing `/etc/resolv.conf` symlinks.
+
+### HTTP Stack Profiling
+
+otaripper actively pins the `reqwest` HTTP engine below v0.13 to avert a breaking transition to Java-based JNI platform verifiers. This guarantees otaripper remains a completely pure native binary, capable of running inside an Android terminal emulator (Termux, adb shell) without triggering Java runtime panics.
+
+---
+
 ## Verification Pipeline
 
 otaripper implements a three-layer verification system.
@@ -366,6 +385,21 @@ Optional `target-cpu=native` for local builds.
 * Memory safety without GC
 * Zero-cost abstractions
 * Strong tooling for systems work
+
+---
+
+## Release Infrastructure
+
+otaripper’s GitHub Actions CI pipeline implements an industry "Gold Standard" verification loop to ensure absolute supply-chain integrity:
+
+### Two-Layer Checksum Architecture
+1. **The External Archive Hash (`checksums.txt`)**
+   The pipeline compiles a single master `checksums.txt` file containing the hashes of all `.tar.gz` and `.zip` artifacts. This acts as the canonical source of truth for automated package managers (like Winget and AUR) to verify the download before proceeding with a build recipe.
+2. **The Internal Binary Hash (`otaripper.sha256`)**
+   A separate `.sha256` file containing the hashes of the raw executables is placed *inside* the release archive. This allows a user to verify the integrity of the binaries locally after extraction, without causing cross-platform filename hash collisions (`otaripper` vs `otaripper.exe`) in the master checksum file.
+
+### Lite Builds
+The CI automatically compiles `otaripper-lite` binaries (`--no-default-features`) alongside standard builds. These strip away the `reqwest` networking stack, offering a minimal, zero-dependency alternative for users who only extract local files.
 
 ---
 
