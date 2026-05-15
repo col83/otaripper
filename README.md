@@ -64,9 +64,10 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-|                         | otaripper v2.3 | payload-dumper-go | payload_dumper (Python) |
+|                         | otaripper v3.0 | payload-dumper-go | payload_dumper (Python) |
 | ----------------------- | -------------- | ----------------- | ----------------------- |
 | Output verification     | ✅ SHA-256      | ❌                | ❌                      |
+| Remote HTTP Streaming   | ✅ (Extract URL)| ❌                | ❌                      |
 | SIMD optimization       | ✅ AVX-512 / AVX2 / SSE2 | ❌        | ❌                      |
 | Cache-aware large writes| ✅              | ❌                | ❌                      |
 | Graceful interruption   | ✅              | ❌                | ❌                      |
@@ -86,8 +87,9 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **2.3** brings massive I/O savings and execution speedups by:
+Version **3.0** introduces flawless Remote HTTP Streaming and massive I/O savings:
 
+* **Remote HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, completely eliminating the need to download the massive 3GB+ OTA zip just to grab a 64MB `boot.img`.
 * **Direct ZIP Memory Mapping**: Bypasses the traditional temp-file extraction step for `STORED` OTA zips, mapping the internal `payload.bin` straight from the disk using a zero-copy offset. Saves gigabytes of SSD writes per extraction.
 * **Modern Decompression Engine**: Upgraded `liblzma` backend safely handles modern Android payloads utilizing the ARM64 BCJ filter (e.g., Xiaomi HyperOS).
 * **Modular Engine Architecture**: Breaking the monolithic extraction logic into specialized `extractor` and `simd` modules.
@@ -129,6 +131,14 @@ Prebuilt binaries are available on the
 * Linux (musl): `otaripper-x86_64-unknown-linux-musl`
 * macOS (Intel): `otaripper-x86_64-apple-darwin`
 * macOS (Apple Silicon): `otaripper-aarch64-apple-darwin`
+
+> **Note:** Each release also includes `otaripper-lite` binaries. These are compiled without remote HTTP extraction features (`--no-default-features`), resulting in an ultra-minimal footprint for users who only extract local files.
+
+### Verifying Downloads
+
+otaripper releases follow a "Gold Standard" two-layer checksum architecture:
+1. **Download Verification:** The release page hosts a master `checksums.txt` file containing hashes for all `.tar.gz` and `.zip` archives.
+2. **Binary Verification:** Upon extracting the archive, you will find an `otaripper-vX.Y.Z.sha256` file enclosed alongside the executables. Run `sha256sum -c *.sha256` in your terminal to instantly verify the integrity of the extracted binaries.
 
 ### Windows (winget)
 
@@ -183,6 +193,14 @@ Extract selected partitions:
 otaripper ota.zip -p boot,vendor_boot,init_boot
 ```
 
+🌐 **Remote HTTP Streaming (Zero-Download Extraction):**
+
+Extract specific partitions directly from a web URL without downloading the full OTA package!
+
+```bash
+otaripper https://android.googleapis.com/packages/ota-api/package.zip -p boot,init_boot
+```
+
 Print hashes:
 
 ```bash
@@ -201,10 +219,26 @@ Disable automatic folder opening:
 otaripper ota.zip -n
 ```
 
-Analyze Qualcomm bootloader ARB metadata (accepts `.img`, `.bin`, or `.zip`):
+Analyze Qualcomm bootloader Anti-Rollback (ARB) metadata (accepts `.img`, `.bin`, or `.zip`):
 
 ```bash
-otaripper arb update.zip or otaripper arb xbl_config.img
+otaripper arb update.zip
+```
+
+🌐 **Remote ARB Inspection (Zero-Download):**
+
+Instantly check the ARB index of a firmware update without downloading the massive 3GB+ zip file! `otaripper` will intelligently stream and extract just the tiny `xbl_config.img` directly from the URL over the internet.
+
+```text
+$ otaripper arb https://example.com/firmware.zip -n
+[arbscan] OTA package detected. Extracting xbl_config.img temporarily...
+[arbscan] Analyzing: xbl_config.img
+
+OEM Metadata
+────────────
+  Major Version : 3
+  Minor Version : 0
+  ARB Index     : 0
 ```
 
 ---
@@ -257,16 +291,25 @@ and refuses to operate on filesystem roots for safety.
 
 ### Build
 
+We provide two built-in Cargo aliases for easy compilation:
+
 ```bash
 git clone https://github.com/syedinsaf/otaripper.git
 cd otaripper
-cargo build --release
+
+# Build the standard CLI (with Remote HTTP Streaming support)
+cargo full
+
+# Build the 'lite' CLI (Network-free, local extraction only)
+cargo lite
 ```
 
-Binary output:
+**Binary output:**
 
-* Linux/macOS: `target/release/otaripper`
-* Windows: `target/release/otaripper.exe`
+* Full Build: `target/release/otaripper`
+* Lite Build: `target/lite/release/otaripper`
+
+> **Note:** The `cargo lite` alias automatically isolates its output into a separate `target/lite/` directory. This ensures you can compile and test both versions side-by-side locally without them overwriting each other!
 
 ---
 
@@ -364,7 +407,7 @@ Testing, bug reports, and performance feedback are welcome.
 Please include:
 
 * OS, CPU, RAM
-* otaripper version
+* otaripper version 3.0.0
 * OTA size and format
 * logs or error messages if available
 
