@@ -1,5 +1,37 @@
 # Changelog
 
+## **otaripper v3.0.0** (2026-05-15)
+
+### Flawless Remote HTTP Streaming & Release Infrastructure
+
+This major release perfects **Remote HTTP Extraction**. You can now extract specific partitions directly from a remote URL over the internet, completely bypassing the need to download massive 3GB+ OTA zip files. It also heavily hardens networking reliability across OS environments and overhauls release artifact verification.
+
+---
+
+## Remote Web Streaming & OS Compatibility
+
+* **Zero-Download HTTP Extraction**
+  * `otaripper` intelligently parses remote OTA zip files and streams *only the exact byte-ranges* needed for your requested partitions over the network.
+* **Android Native CLI Fixes**
+  * Downgraded `reqwest` to `0.12.9` to eliminate a Java-based platform verifier dependency that was causing native panics inside Android terminal environments.
+  * Implemented a dynamic OS-level fallback to strictly use the native OS resolver on Android, circumventing issues with custom ROMs that have broken `/etc/resolv.conf` symlinks.
+* **Linux/Windows DNS Stability**
+  * Transitioned Linux and Windows builds to use the pure-Rust `hickory-dns` resolver. This completely bypasses a known bug in `musl libc` that caused dropped cold connections, stabilizing remote HTTP extraction on static Linux builds.
+
+---
+
+## Release Engineering
+
+* **"Gold Standard" Master Checksums**
+  * Overhauled the GitHub Actions CI pipeline to compile a single, master `checksums.txt` file per release.
+  * This file contains all SHA-256 hashes for the distributed archives (`.tar.gz` and `.zip`), fully streamlining automated ingestion by package managers like Winget and AUR.
+* **Internal Binary Verification**
+  * Raw binary checksums (`otaripper.sha256`) are now safely enclosed *inside* the release archives, ensuring users can natively verify their extracted executables without cross-platform filename hash collisions.
+* **Otaripper Lite Builds**
+  * Added automated distribution of `otaripper-lite` binaries. These builds explicitly exclude network dependencies (no HTTP remote capabilities) to achieve an ultra-minimal footprint for local-only extraction workflows.
+
+---
+
 ## **otaripper v2.3.0** (2026-05-07)
 
 ### Direct Zip Memory Mapping (Zero-Copy Extraction)
