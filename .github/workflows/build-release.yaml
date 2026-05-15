@@ -125,7 +125,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: dist/
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -134,7 +136,6 @@ jobs:
           draft: true
           files: |
             *.tar.gz
-            *.tar.gz.sha256
 
 # =========================
 # Windows Builds
@@ -194,7 +195,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: dist/
+          path: |
+            *.zip
+            *.zip.sha256
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -203,7 +206,6 @@ jobs:
           draft: true
           files: |
             *.zip
-            *.zip.sha256
 
 # =========================
 # macOS Builds
@@ -263,7 +265,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: dist/
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -272,7 +276,6 @@ jobs:
           draft: true
           files: |
             *.tar.gz
-            *.tar.gz.sha256
 
 # =========================
 # Android (ARM64)
@@ -343,7 +346,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: android-arm64
-          path: dist/
+          path: |
+            *.zip
+            *.zip.sha256
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -352,7 +357,6 @@ jobs:
           draft: true
           files: |
             *.zip
-            *.zip.sha256
 
 # =========================
 # GitHub Release
@@ -365,6 +369,17 @@ jobs:
       contents: write
 
     steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate Master Checksums
+        run: |
+          find artifacts -type f -name "*.sha256" -exec cat {} + | sort > checksums.txt
+          echo "Generated checksums.txt:"
+          cat checksums.txt
+
       - name: Publish Draft Release
         uses: softprops/action-gh-release@v3
         with:
@@ -372,6 +387,7 @@ jobs:
           name: "otaripper ${{ github.ref_name }}"
           draft: false
           generate_release_notes: true
+          files: checksums.txt
 
 # =========================
 # Cleanup on Failure
