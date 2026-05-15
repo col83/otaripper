@@ -577,18 +577,42 @@ impl<'a> Extractor<'a> {
         threadpool.scope(|scope| -> Result<()> {
             let multiprogress = MultiProgress::new();
 
-            for (hash_index_counter, update) in manifest
-                .partitions
-                .iter()
-                .filter(|update| {
-                    self.cmd.partitions.is_empty()
-                        || self.cmd.partitions.contains(&update.partition_name)
-                })
-                .enumerate()
+            // create all bars upfront so the network bar stays at the bottom
+            let mut pending_partitions = Vec::new();
+            for (hash_index_counter, update) in manifest.partitions.iter().filter(|u| {
+                self.cmd.partitions.is_empty() || self.cmd.partitions.contains(&u.partition_name)
+            }).enumerate() {
+                let pb = multiprogress.add(self.create_progress_bar(update)?);
+                pending_partitions.push((hash_index_counter, update, pb));
+            }
+
+            // append the global network monitor bar below the partition bars
+            #[cfg(feature = "remote")]
             {
+                if payload_path_str.starts_with("http://") || payload_path_str.starts_with("https://") {
+                    let mut total_down_size = 0u64;
+                    for (_, update, _) in &pending_partitions {
+                        for op in &update.operations {
+                            total_down_size += op.data_length.unwrap_or(0);
+                        }
+                    }
+
+                    let bar_style = ProgressStyle::with_template(
+                        "\n{prefix:.cyan.bold} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})"
+                    ).unwrap();
+                    
+                    let bar_pb = multiprogress.add(ProgressBar::new(total_down_size).with_style(bar_style));
+                    bar_pb.set_prefix("Network:");
+                    bar_pb.enable_steady_tick(std::time::Duration::from_millis(200)); 
+                    let ok = crate::remote::GLOBAL_NETWORK_STATUS.set(bar_pb).is_ok();
+                    debug_assert!(ok, "GLOBAL_NETWORK_STATUS set more than once");
+                }
+            }
+
+            for (hash_index_counter, update, pb) in pending_partitions {
                 if self.process_partition(
                     scope,
-                    &multiprogress,
+                    pb,
                     hash_index_counter,
                     update,
                     payload,
@@ -606,6 +630,14 @@ impl<'a> Extractor<'a> {
             }
             Ok(())
         })?;
+
+        // clear the network bar once all workers finish
+        #[cfg(feature = "remote")]
+        {
+            if let Some(pb) = crate::remote::GLOBAL_NETWORK_STATUS.get() {
+                pb.finish_and_clear();
+            }
+        }
 
         // 5. Finalize: Error check, Reporting, and UI
         if cancellation_token.load(Ordering::Acquire) {
@@ -627,7 +659,7 @@ impl<'a> Extractor<'a> {
     fn process_partition<'s>(
         &'s self,
         scope: &rayon::Scope<'s>,
-        multiprogress: &MultiProgress,
+        progress_bar: ProgressBar,
         part_index: usize,
         update: &'s PartitionUpdate,
         payload: &'s Payload,
@@ -651,7 +683,6 @@ impl<'a> Extractor<'a> {
             return Ok(true);
         }
 
-        let progress_bar = multiprogress.add(self.create_progress_bar(update)?);
         let (partition_file, partition_len, out_path) =
             self.open_partition_file(update, partition_dir)?;
 
@@ -1243,6 +1274,7 @@ impl<'a> Extractor<'a> {
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .pool_max_idle_per_host(32)
                     .tcp_nodelay(true)
+                    .tcp_keepalive(std::time::Duration::from_secs(5))
                     .hickory_dns(use_hickory)
                     .build()
                     .context("Failed to build HTTP client")?;

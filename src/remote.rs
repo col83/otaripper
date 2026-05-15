@@ -3,12 +3,44 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use console::Style;
 
-const MAX_RETRIES: usize = 10;
 const CACHE_SIZE: u64 = 256 * 1024;  // 256KB head/tail ZIP pre fetch
 
 // global bandwidth tracker (shows exactly how much data we saved the user)
 pub static NETWORK_BYTES_READ: AtomicUsize = AtomicUsize::new(0);
+
+// thread safe dynamic UI controller
+pub static GLOBAL_NETWORK_STATUS: OnceLock<ProgressBar> = OnceLock::new();
+// Used as a flag, not a true count, only the 0→1 and >0→0 transitions update the UI
+static OFFLINE_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_network_offline(msg: &str) {
+    if let Some(pb) = GLOBAL_NETWORK_STATUS.get() {
+        let style = ProgressStyle::with_template("\n{prefix:.cyan.bold} {msg}").unwrap();
+        pb.set_style(style);
+        pb.set_message(msg.to_string());
+        pb.reset_eta();
+    }
+}
+
+pub fn set_network_online() {
+    if let Some(pb) = GLOBAL_NETWORK_STATUS.get() {
+        let style = ProgressStyle::with_template("\n{prefix:.cyan.bold} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})").unwrap();
+        pb.set_style(style);
+        pb.set_message("");
+        pb.reset_eta();
+    }
+}
+
+fn mark_offline(msg: &str) {
+    let count = OFFLINE_THREADS.fetch_add(1, Ordering::SeqCst);
+    if count == 0 {
+        let styled = Style::new().bold().yellow().apply_to(msg).to_string();
+        set_network_offline(&styled);
+    }
+}
 
 /// pulls a specific partition chunk over HTTP with aggressive retries
 /// Fakes the progress bar bytes so it matches the uncompressed disk writes (keeps UI smooth)
@@ -65,13 +97,13 @@ fn fetch_range_with_retries(
     let size = buf.len();
     let mut total_read = 0;
     let mut ui_reported = 0u64;
-    let mut attempts = 0;
-    
+    // no retry cap, means loops until done or Ctrl+C, backoff starts at 500ms and tops out at 3s
+    let mut backoff_ms = 500;
+
     // massive fr 256KB read buffer to prevent loop/syscall overhead
     let mut chunk = vec![0u8; 256 * 1024];
 
     while total_read < size {
-        attempts += 1;
         let req_start = start + total_read as u64;
 
         match client.get(url).header("Range", format!("bytes={}-{}", req_start, end)).send() {
@@ -80,15 +112,26 @@ fn fetch_range_with_retries(
                 // and is trying to send the entire ROM, Bail gracefully!
                 if resp.status() == reqwest::StatusCode::OK {
                     bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                } else if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    // 429 rate limit, back off and retry
+                    mark_offline("server is busy, pausing for a few seconds...");
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    continue;
                 } else if !resp.status().is_success() {
-                    if attempts >= MAX_RETRIES { bail!("Server rejected range request: {}", resp.status()); }
+                    bail!("Server rejected range request: {}", resp.status());
                 } else {
+                    backoff_ms = 500;
+                    let was_offline = OFFLINE_THREADS.swap(0, Ordering::SeqCst);
+                    if was_offline > 0 {
+                        set_network_online();
+                    }
+
                     loop {
                         let n = match resp.read(&mut chunk) {
                             Ok(0) => break, // EOF
                             Ok(n) => n,
-                            Err(e) => {
-                                if attempts >= MAX_RETRIES { bail!("Connection died and ran out of retries: {}", e); }
+                            Err(_) => {
+                                mark_offline("connection lost, waiting to resume...");
                                 break;
                             }
                         };
@@ -101,6 +144,9 @@ fn fetch_range_with_retries(
                         buf[total_read..total_read + n].copy_from_slice(&chunk[..n]);
                         total_read += n;
                         NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                        if let Some(monitor) = GLOBAL_NETWORK_STATUS.get() {
+                            monitor.inc(n as u64);
+                        }
 
                         // Sync UI in real time
                         let expected = (total_read as f64 * ratio) as u64;
@@ -112,12 +158,15 @@ fn fetch_range_with_retries(
                     }
                 }
             }
-            Err(e) if attempts >= MAX_RETRIES => bail!("Network timeout/error: {}", e),
-            _ => {}
+            Err(_) => {
+                mark_offline("connection lost, waiting to resume...");
+            }
         }
-        
-        // give the connection a breather
-        if total_read < size { std::thread::sleep(std::time::Duration::from_millis(500)); }
+
+        if total_read < size {
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            backoff_ms = (backoff_ms * 2).min(3_000); // cap offline sleep to 3s for fast reconnects
+        }
     }
     Ok(())
 }
