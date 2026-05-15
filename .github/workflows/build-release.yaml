@@ -125,9 +125,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.tar.gz
-            *.tar.gz.sha256
+          path: dist/
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -196,9 +194,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.zip
-            *.zip.sha256
+          path: dist/
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -267,9 +263,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
-          path: |
-            *.tar.gz
-            *.tar.gz.sha256
+          path: dist/
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -349,9 +343,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: android-arm64
-          path: |
-            *.zip
-            *.zip.sha256
+          path: dist/
 
       - name: Stage Assets to Draft Release
         uses: softprops/action-gh-release@v3
@@ -413,6 +405,3 @@ jobs:
           echo "Build failed, Cleaning up ${{ github.ref_name }}..."
           gh release delete "${{ github.ref_name }}" --repo "${{ github.repository }}" --yes || echo "No draft release found to delete!"
           git push --delete origin "${{ github.ref_name }}" || echo "No tag found to delete!"
-
-
-
