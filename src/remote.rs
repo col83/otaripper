@@ -57,7 +57,7 @@ pub fn fetch_http_chunk(
         return Ok(Vec::new());
     }
     let mut buf = vec![0u8; size];
-    let ratio = if size > 0 { total_dst_size as f64 / size as f64 } else { 1.0 };
+    let ratio = total_dst_size as f64 / size as f64;
 
     // Parallel chunking For heavy payloads, we split the single HTTP request into
     // multiple 8MB parallel Range requests to saturate the bandwidth!
@@ -68,7 +68,7 @@ pub fn fetch_http_chunk(
             .par_chunks_mut(part_size)
             .enumerate()
             .map(|(i, chunk_slice)| {
-                let chunk_start = start + (i *part_size) as u64;
+                let chunk_start = start + (i * part_size) as u64;
                 let chunk_end = chunk_start + chunk_slice.len() as u64 - 1;
                 fetch_range_with_retries(client, url, chunk_start, chunk_end, chunk_slice, pb, ratio)
             })
@@ -79,7 +79,7 @@ pub fn fetch_http_chunk(
         }
     } else {
         // normal fast path for smaller operations like where the overhead of parallelism isn't worth it
-        fetch_range_with_retries(client, url, start, start+ size as u64 - 1, &mut buf, pb, ratio)?;
+        fetch_range_with_retries(client, url, start, start + size as u64 - 1, &mut buf, pb, ratio)?;
     }
 
     Ok(buf)
@@ -115,6 +115,7 @@ fn fetch_range_with_retries(
                 } else if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     // 429 rate limit, back off and retry
                     mark_offline("server is busy, pausing for a few seconds...");
+                    backoff_ms = 500;
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     continue;
                 } else if !resp.status().is_success() {
@@ -221,21 +222,36 @@ impl CachingHttpReader {
         pb.set_message("Fetching headers...");
         let mut head_buf = Vec::with_capacity(head_size as usize);
         if head_size > 0 {
-            let mut req = client.get(url).header("Range", format!("bytes=0-{}", head_size - 1)).send()?;
-            if req.status() == reqwest::StatusCode::OK {
-                bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
-            } else if req.status().is_success() {
-                let mut chunk = vec![0u8; 128 * 1024]; // 128kb burst read
-                loop {
-                    let n = match req.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    head_buf.extend_from_slice(&chunk[..n]);
-                    NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
-                    pb.inc(n as u64);
+            loop {
+                head_buf.clear();
+                match client.get(url).header("Range", format!("bytes=0-{}", head_size - 1)).send() {
+                    Ok(mut req) => {
+                        if req.status() == reqwest::StatusCode::OK {
+                            bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                        } else if req.status().is_success() {
+                            pb.set_message("Fetching headers...");
+                            let mut chunk = vec![0u8; 128 * 1024]; // 128kb burst read
+                            loop {
+                                let n = match req.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(n) => n,
+                                    Err(_) => {
+                                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                                        break;
+                                    }
+                                };
+                                head_buf.extend_from_slice(&chunk[..n]);
+                                NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                                pb.inc(n as u64);
+                            }
+                        }
+                        if head_buf.len() >= head_size as usize { break; }
+                    }
+                    Err(_) => {
+                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                    }
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
 
@@ -243,21 +259,36 @@ impl CachingHttpReader {
         pb.set_message("Fetching ZIP directory...");
         let mut tail_buf = Vec::with_capacity(tail_size as usize);
         if tail_start < length {
-            let mut req = client.get(url).header("Range", format!("bytes={}-{}", tail_start, length - 1)).send()?;
-            if req.status() == reqwest::StatusCode::OK {
-                bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
-            } else if req.status().is_success() {
-                let mut chunk = vec![0u8; 128 * 1024];
-                loop {
-                    let n = match req.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    tail_buf.extend_from_slice(&chunk[..n]);
-                    NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
-                    pb.inc(n as u64);
+            loop {
+                tail_buf.clear();
+                match client.get(url).header("Range", format!("bytes={}-{}", tail_start, length - 1)).send() {
+                    Ok(mut req) => {
+                        if req.status() == reqwest::StatusCode::OK {
+                            bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                        } else if req.status().is_success() {
+                            pb.set_message("Fetching ZIP directory...");
+                            let mut chunk = vec![0u8; 128 * 1024];
+                            loop {
+                                let n = match req.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(n) => n,
+                                    Err(_) => {
+                                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                                        break;
+                                    }
+                                };
+                                tail_buf.extend_from_slice(&chunk[..n]);
+                                NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                                pb.inc(n as u64);
+                            }
+                        }
+                        if tail_buf.len() >= tail_size as usize { break; }
+                    }
+                    Err(_) => {
+                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                    }
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
 

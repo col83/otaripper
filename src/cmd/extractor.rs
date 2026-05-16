@@ -1275,6 +1275,7 @@ impl<'a> Extractor<'a> {
                     .pool_max_idle_per_host(32)
                     .tcp_nodelay(true)
                     .tcp_keepalive(std::time::Duration::from_secs(5))
+                    .user_agent(concat!("otaripper/", env!("CARGO_PKG_VERSION")))
                     .hickory_dns(use_hickory)
                     .build()
                     .context("Failed to build HTTP client")?;
