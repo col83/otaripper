@@ -152,6 +152,8 @@ winget install syedinsaf.otaripper
 To update to the latest version:
 
 ```powershell
+winget update syedinsaf.otaripper
+# or
 winget upgrade syedinsaf.otaripper
 ```
 
