@@ -64,10 +64,10 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-|                         | otaripper v3.0 | payload-dumper-go | payload_dumper (Python) |
+|                         | otaripper v3.1 | payload-dumper-go | payload_dumper (Python) |
 | ----------------------- | -------------- | ----------------- | ----------------------- |
 | Output verification     | ✅ SHA-256      | ❌                | ❌                      |
-| Remote HTTP Streaming   | ✅ (Extract URL)| ❌                | ❌                      |
+| Remote HTTP Streaming   | ✅ (Parallel)   | ❌                | ❌                      |
 | SIMD optimization       | ✅ AVX-512 / AVX2 / SSE2 | ❌        | ❌                      |
 | Cache-aware large writes| ✅              | ❌                | ❌                      |
 | Graceful interruption   | ✅              | ❌                | ❌                      |
@@ -87,10 +87,11 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **3.0** introduces flawless Remote HTTP Streaming and massive I/O savings:
+Version **3.1** introduces parallel chunked Remote HTTP Streaming and massive I/O savings:
 
-* **Remote HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, completely eliminating the need to download the massive 3GB+ OTA zip just to grab a 64MB `boot.img`.
-* **Direct ZIP Memory Mapping**: Bypasses the traditional temp-file extraction step for `STORED` OTA zips, mapping the internal `payload.bin` straight from the disk using a zero-copy offset. Saves gigabytes of SSD writes per extraction.
+* **Parallel HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, using multiple parallel 8MB chunked requests to saturate your bandwidth.
+* **Network Resilience**: Built-in automatic retries with exponential backoff and real-time offline detection. Never fail an extraction due to a temporary connection drop again.
+* **Direct ZIP Memory Mapping**: Bypasses the traditional temp-file extraction step for `STORED` OTA zips, mapping the internal `payload.bin` straight from the disk using a zero-copy offset.
 * **Modern Decompression Engine**: Upgraded `liblzma` backend safely handles modern Android payloads utilizing the ARM64 BCJ filter (e.g., Xiaomi HyperOS).
 * **Modular Engine Architecture**: Breaking the monolithic extraction logic into specialized `extractor` and `simd` modules.
 * **Thread-Local Buffer Pooling**: Drastically amortizing memory allocations across deep Rayon threadpools.
@@ -407,7 +408,7 @@ Testing, bug reports, and performance feedback are welcome.
 Please include:
 
 * OS, CPU, RAM
-* otaripper version 3.0.0
+* otaripper version 3.1.0
 * OTA size and format
 * logs or error messages if available
 
