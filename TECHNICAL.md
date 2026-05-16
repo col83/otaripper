@@ -2,8 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v3.0 Note:**
-> This release perfects Remote HTTP Streaming and introduces zero-copy Zip memory mapping for standard OTA payloads, completely eliminating redundant I/O bottlenecks. It also integrates native `arbscan` support and a modernized ARM64 BCJ decompression backend.
+> **v3.1 Note:**
+> This release introduces Parallel Chunked HTTP Streaming and massive network resilience hardening. It features multi-threaded Range requests, a dedicated bandwidth monitor, and dynamic resolver selection to ensure flawless remote extraction across Linux, Windows, and Android environments.
 
 ---
 
@@ -212,6 +212,21 @@ Outputs detected SIMD capabilities and the selected execution path.
 ## Remote Extraction Architecture
 
 otaripper's remote HTTP extraction engine (`--remote`) is highly tuned to bypass OS-specific networking quirks while maintaining absolute reliability across varied native environments.
+
+### Parallel Chunked Streaming (v3.1)
+
+To saturate high-bandwidth connections, `otaripper` no longer fetches remote partitions as a single linear stream. Instead, it utilizes **Parallel Chunked Requests**:
+* Large partitions are decomposed into **8 MiB chunks**.
+* These chunks are distributed across the Rayon worker pool.
+* Each worker issues independent `Range` requests, allowing the engine to overcome per-connection bandwidth throttling often implemented by CDNs.
+
+### Network Resilience and Offline Recovery
+
+Remote extraction is inherently volatile. `otaripper` implements a robust recovery loop:
+* **Exponential Backoff**: Failed requests are retried indefinitely with a backoff starting at 500ms and capping at 3s.
+* **Stateful Resumption**: The engine tracks exactly which bytes were successfully read and validated, resuming precisely at the point of failure.
+* **Dynamic Network Monitoring**: A global bandwidth tracker (`NETWORK_BYTES_READ`) provides real-time throughput data to a dedicated UI thread, which displays a separate "Network" progress bar.
+* **429 Rate Limit Handling**: If a server issues a "Too Many Requests" response, `otaripper` automatically pauses, marks the thread as offline, and waits for a cooldown period before resuming.
 
 ### Dynamic DNS Resolution
 
