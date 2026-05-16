@@ -185,16 +185,25 @@ pub struct CachingHttpReader {
 impl CachingHttpReader {
     pub fn new(client: reqwest::blocking::Client, url: &str, pb: &ProgressBar) -> anyhow::Result<Self> {
         pb.set_message("Connecting to remote server...");
-        let resp = client.head(url).send()?;
+        // some CDNs and pre-signed URLs (OSS, S3, GCS) reject HEAD so a 0-byte range GET works everywhere
+        let resp = client.get(url).header("Range", "bytes=0-0").send()?;
         if !resp.status().is_success() {
             bail!("Failed to access URL: {}", resp.status());
         }
         
+        // prefer Content-Range for the real size, fall back to Content-Length
         let length = resp.headers()
-            .get("Content-Length")
+            .get("Content-Range")
             .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split('/').last())
             .and_then(|v| v.parse::<u64>().ok())
-            .context("Server didn't return Content-Length, can't seek this remote file.")?;
+            .or_else(|| {
+                resp.headers()
+                    .get("Content-Length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .context("Server didn't return file size, can't seek this remote file.")?;
 
         let head_size = CACHE_SIZE.min(length);
         let tail_size = CACHE_SIZE.min(length);
