@@ -3,12 +3,44 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use console::Style;
 
-const MAX_RETRIES: usize = 10;
 const CACHE_SIZE: u64 = 256 * 1024;  // 256KB head/tail ZIP pre fetch
 
 // global bandwidth tracker (shows exactly how much data we saved the user)
 pub static NETWORK_BYTES_READ: AtomicUsize = AtomicUsize::new(0);
+
+// thread safe dynamic UI controller
+pub static GLOBAL_NETWORK_STATUS: OnceLock<ProgressBar> = OnceLock::new();
+// Used as a flag, not a true count, only the 0→1 and >0→0 transitions update the UI
+static OFFLINE_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_network_offline(msg: &str) {
+    if let Some(pb) = GLOBAL_NETWORK_STATUS.get() {
+        let style = ProgressStyle::with_template("\n{prefix:.cyan.bold} {msg}").unwrap();
+        pb.set_style(style);
+        pb.set_message(msg.to_string());
+        pb.reset_eta();
+    }
+}
+
+pub fn set_network_online() {
+    if let Some(pb) = GLOBAL_NETWORK_STATUS.get() {
+        let style = ProgressStyle::with_template("\n{prefix:.cyan.bold} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})").unwrap();
+        pb.set_style(style);
+        pb.set_message("");
+        pb.reset_eta();
+    }
+}
+
+fn mark_offline(msg: &str) {
+    let count = OFFLINE_THREADS.fetch_add(1, Ordering::SeqCst);
+    if count == 0 {
+        let styled = Style::new().bold().yellow().apply_to(msg).to_string();
+        set_network_offline(&styled);
+    }
+}
 
 /// pulls a specific partition chunk over HTTP with aggressive retries
 /// Fakes the progress bar bytes so it matches the uncompressed disk writes (keeps UI smooth)
@@ -25,7 +57,7 @@ pub fn fetch_http_chunk(
         return Ok(Vec::new());
     }
     let mut buf = vec![0u8; size];
-    let ratio = if size > 0 { total_dst_size as f64 / size as f64 } else { 1.0 };
+    let ratio = total_dst_size as f64 / size as f64;
 
     // Parallel chunking For heavy payloads, we split the single HTTP request into
     // multiple 8MB parallel Range requests to saturate the bandwidth!
@@ -36,7 +68,7 @@ pub fn fetch_http_chunk(
             .par_chunks_mut(part_size)
             .enumerate()
             .map(|(i, chunk_slice)| {
-                let chunk_start = start + (i *part_size) as u64;
+                let chunk_start = start + (i * part_size) as u64;
                 let chunk_end = chunk_start + chunk_slice.len() as u64 - 1;
                 fetch_range_with_retries(client, url, chunk_start, chunk_end, chunk_slice, pb, ratio)
             })
@@ -47,7 +79,7 @@ pub fn fetch_http_chunk(
         }
     } else {
         // normal fast path for smaller operations like where the overhead of parallelism isn't worth it
-        fetch_range_with_retries(client, url, start, start+ size as u64 - 1, &mut buf, pb, ratio)?;
+        fetch_range_with_retries(client, url, start, start + size as u64 - 1, &mut buf, pb, ratio)?;
     }
 
     Ok(buf)
@@ -65,13 +97,13 @@ fn fetch_range_with_retries(
     let size = buf.len();
     let mut total_read = 0;
     let mut ui_reported = 0u64;
-    let mut attempts = 0;
-    
+    // no retry cap, means loops until done or Ctrl+C, backoff starts at 500ms and tops out at 3s
+    let mut backoff_ms = 500;
+
     // massive fr 256KB read buffer to prevent loop/syscall overhead
     let mut chunk = vec![0u8; 256 * 1024];
 
     while total_read < size {
-        attempts += 1;
         let req_start = start + total_read as u64;
 
         match client.get(url).header("Range", format!("bytes={}-{}", req_start, end)).send() {
@@ -80,15 +112,27 @@ fn fetch_range_with_retries(
                 // and is trying to send the entire ROM, Bail gracefully!
                 if resp.status() == reqwest::StatusCode::OK {
                     bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                } else if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    // 429 rate limit, back off and retry
+                    mark_offline("server is busy, pausing for a few seconds...");
+                    backoff_ms = 500;
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    continue;
                 } else if !resp.status().is_success() {
-                    if attempts >= MAX_RETRIES { bail!("Server rejected range request: {}", resp.status()); }
+                    bail!("Server rejected range request: {}", resp.status());
                 } else {
+                    backoff_ms = 500;
+                    let was_offline = OFFLINE_THREADS.swap(0, Ordering::SeqCst);
+                    if was_offline > 0 {
+                        set_network_online();
+                    }
+
                     loop {
                         let n = match resp.read(&mut chunk) {
                             Ok(0) => break, // EOF
                             Ok(n) => n,
-                            Err(e) => {
-                                if attempts >= MAX_RETRIES { bail!("Connection died and ran out of retries: {}", e); }
+                            Err(_) => {
+                                mark_offline("connection lost, waiting to resume...");
                                 break;
                             }
                         };
@@ -101,6 +145,9 @@ fn fetch_range_with_retries(
                         buf[total_read..total_read + n].copy_from_slice(&chunk[..n]);
                         total_read += n;
                         NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                        if let Some(monitor) = GLOBAL_NETWORK_STATUS.get() {
+                            monitor.inc(n as u64);
+                        }
 
                         // Sync UI in real time
                         let expected = (total_read as f64 * ratio) as u64;
@@ -112,12 +159,15 @@ fn fetch_range_with_retries(
                     }
                 }
             }
-            Err(e) if attempts >= MAX_RETRIES => bail!("Network timeout/error: {}", e),
-            _ => {}
+            Err(_) => {
+                mark_offline("connection lost, waiting to resume...");
+            }
         }
-        
-        // give the connection a breather
-        if total_read < size { std::thread::sleep(std::time::Duration::from_millis(500)); }
+
+        if total_read < size {
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            backoff_ms = (backoff_ms * 2).min(3_000); // cap offline sleep to 3s for fast reconnects
+        }
     }
     Ok(())
 }
@@ -136,16 +186,25 @@ pub struct CachingHttpReader {
 impl CachingHttpReader {
     pub fn new(client: reqwest::blocking::Client, url: &str, pb: &ProgressBar) -> anyhow::Result<Self> {
         pb.set_message("Connecting to remote server...");
-        let resp = client.head(url).send()?;
+        // some CDNs and pre-signed URLs (OSS, S3, GCS) reject HEAD so a 0-byte range GET works everywhere
+        let resp = client.get(url).header("Range", "bytes=0-0").send()?;
         if !resp.status().is_success() {
             bail!("Failed to access URL: {}", resp.status());
         }
         
+        // prefer Content-Range for the real size, fall back to Content-Length
         let length = resp.headers()
-            .get("Content-Length")
+            .get("Content-Range")
             .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split('/').last())
             .and_then(|v| v.parse::<u64>().ok())
-            .context("Server didn't return Content-Length, can't seek this remote file.")?;
+            .or_else(|| {
+                resp.headers()
+                    .get("Content-Length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .context("Server didn't return file size, can't seek this remote file.")?;
 
         let head_size = CACHE_SIZE.min(length);
         let tail_size = CACHE_SIZE.min(length);
@@ -163,21 +222,36 @@ impl CachingHttpReader {
         pb.set_message("Fetching headers...");
         let mut head_buf = Vec::with_capacity(head_size as usize);
         if head_size > 0 {
-            let mut req = client.get(url).header("Range", format!("bytes=0-{}", head_size - 1)).send()?;
-            if req.status() == reqwest::StatusCode::OK {
-                bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
-            } else if req.status().is_success() {
-                let mut chunk = vec![0u8; 128 * 1024]; // 128kb burst read
-                loop {
-                    let n = match req.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    head_buf.extend_from_slice(&chunk[..n]);
-                    NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
-                    pb.inc(n as u64);
+            loop {
+                head_buf.clear();
+                match client.get(url).header("Range", format!("bytes=0-{}", head_size - 1)).send() {
+                    Ok(mut req) => {
+                        if req.status() == reqwest::StatusCode::OK {
+                            bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                        } else if req.status().is_success() {
+                            pb.set_message("Fetching headers...");
+                            let mut chunk = vec![0u8; 128 * 1024]; // 128kb burst read
+                            loop {
+                                let n = match req.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(n) => n,
+                                    Err(_) => {
+                                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                                        break;
+                                    }
+                                };
+                                head_buf.extend_from_slice(&chunk[..n]);
+                                NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                                pb.inc(n as u64);
+                            }
+                        }
+                        if head_buf.len() >= head_size as usize { break; }
+                    }
+                    Err(_) => {
+                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                    }
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
 
@@ -185,21 +259,36 @@ impl CachingHttpReader {
         pb.set_message("Fetching ZIP directory...");
         let mut tail_buf = Vec::with_capacity(tail_size as usize);
         if tail_start < length {
-            let mut req = client.get(url).header("Range", format!("bytes={}-{}", tail_start, length - 1)).send()?;
-            if req.status() == reqwest::StatusCode::OK {
-                bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
-            } else if req.status().is_success() {
-                let mut chunk = vec![0u8; 128 * 1024];
-                loop {
-                    let n = match req.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    tail_buf.extend_from_slice(&chunk[..n]);
-                    NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
-                    pb.inc(n as u64);
+            loop {
+                tail_buf.clear();
+                match client.get(url).header("Range", format!("bytes={}-{}", tail_start, length - 1)).send() {
+                    Ok(mut req) => {
+                        if req.status() == reqwest::StatusCode::OK {
+                            bail!("The remote server does not support HTTP Range requests, Streaming is impossible!");
+                        } else if req.status().is_success() {
+                            pb.set_message("Fetching ZIP directory...");
+                            let mut chunk = vec![0u8; 128 * 1024];
+                            loop {
+                                let n = match req.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(n) => n,
+                                    Err(_) => {
+                                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                                        break;
+                                    }
+                                };
+                                tail_buf.extend_from_slice(&chunk[..n]);
+                                NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+                                pb.inc(n as u64);
+                            }
+                        }
+                        if tail_buf.len() >= tail_size as usize { break; }
+                    }
+                    Err(_) => {
+                        pb.set_message(console::Style::new().bold().yellow().apply_to("connection lost, waiting to resume...").to_string());
+                    }
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
 
