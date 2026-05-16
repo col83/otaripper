@@ -1,5 +1,49 @@
 # Changelog
 
+## **otaripper v3.1.0** (2026-05-17)
+
+### Parallel Chunked Streaming & Network Resilience
+
+This release focuses on hardening **Remote HTTP Extraction** for unreliable network environments and saturating high-bandwidth connections. It introduces parallel chunked requests, a dedicated bandwidth monitor, and a pure-native networking stack optimized for Android.
+
+---
+
+## Parallel HTTP Streaming
+
+* **Multi-Threaded Chunking**
+  * Large remote partitions are now split into multiple **8MB parallel Range requests**.
+  * This allows `otaripper` to fully saturate high-bandwidth connections that might otherwise be throttled per-connection by CDNs.
+* **Global Bandwidth Monitor**
+  * Added a persistent **"Network:" progress bar** at the bottom of the multi-progress view.
+  * Tracks aggregate download progress, real-time speed, and total data retrieved across all worker threads.
+
+---
+
+## Network Resilience & UX
+
+* **Robust Connection Recovery**
+  * Implemented an **infinite retry loop with exponential backoff** (500ms to 3s).
+  * If a connection is dropped mid-stream, `otaripper` now waits and resumes exactly where it left off instead of failing the extraction.
+* **Dynamic Offline UI**
+  * The UI now detects connection losses in real-time, displaying a **"connection lost, waiting to resume..."** status until the network is restored.
+* **Smart Rate Limiting**
+  * Explicitly handles **HTTP 429 (Too Many Requests)** by automatically cooling down and retrying, preventing bans from aggressive CDNs.
+
+---
+
+## Infrastructure & Security
+
+* **Pure-Native Android Support**
+  * Pinned `reqwest` to ensure a completely native TLS/networking stack. This eliminates dependencies on Java-based platform verifiers that caused panics in Android terminal environments (Termux/ADB).
+* **Advanced DNS Resolver Selection**
+  * **Linux/Windows**: Continues using `hickory-dns` to bypass `musl libc` cold-connection bugs.
+  * **Android**: Now dynamically detects the environment and falls back to the **Native OS Resolver** to handle broken `/etc/resolv.conf` symlinks on custom ROMs.
+* **Security Hardening**
+  * Implemented a **256MB manifest size limit** to prevent OOM attacks from malicious remote servers.
+  * Added validation to ensure remote servers correctly support **HTTP Range requests** before starting extraction.
+
+---
+
 ## **otaripper v3.0.0** (2026-05-15)
 
 ### Flawless Remote HTTP Streaming & Release Infrastructure
