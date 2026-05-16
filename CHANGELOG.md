@@ -1,5 +1,17 @@
 # Changelog
 
+## **otaripper v3.1.1** (2026-05-17)
+
+### Modern Qualcomm ARB Metadata Support
+
+This release fixes a critical validation constraint in the bootloader ARB scanning logic (`arbscan` subcommand) to support modern Snapdragon devices.
+
+* **Relaxed Hash Table Validation Check**
+  * Updated [`find_hash_header`](file:///e:/Downloads/Music/otaripper/src/cmd/arbscan.rs#L109-L145) to accept hash table sizes that are a multiple of 16 (using mask `& 0xF`) instead of strictly requiring a multiple of 32 (using mask `& 0x1F`).
+  * This successfully resolves scanning failures on newer Snapdragon devices (such as Snapdragon 8 Gen 1, Gen 2, and Gen 3) which utilize **SHA-384** (48-byte digests) for Secure Boot validation, while remaining compatible with older **SHA-256** bootloaders and future-proofing the engine for potential **SHA-512** (64-byte digests) implementations.
+
+---
+
 ## **otaripper v3.1.0** (2026-05-17)
 
 ### Parallel Chunked Streaming & Network Resilience
