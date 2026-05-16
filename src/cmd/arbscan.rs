@@ -124,7 +124,8 @@ fn find_hash_header(seg: &[u8]) -> Option<usize> {
         if common_sz > 0x1000 || qti_sz > 0x1000 || oem_sz > 0x4000 {
             continue;
         }
-        if hash_tbl_sz == 0 || (hash_tbl_sz & 0x1F) != 0 {
+        // Support both SHA256 (multiple of 32) and SHA384 (multiple of 48) hash tables by checking for a multiple of 16
+        if hash_tbl_sz == 0 || (hash_tbl_sz & 0xF) != 0 {
             continue;
         }
         if off + HASH_HDR_SIZE + common_sz + qti_sz + oem_sz > seg.len() {
