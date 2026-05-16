@@ -1,10 +1,10 @@
 use std::fmt;
-use std::fs::{write, File};
+use std::fs::{File, write};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use crate::cmd::extractor::Extractor;
 use crate::cmd::Cmd;
+use crate::cmd::extractor::Extractor;
 use serde::Serialize;
 
 const EI_CLASS: usize = 4;
@@ -64,15 +64,24 @@ impl From<serde_json::Error> for ArbError {
 
 // helpers
 fn read_le16(buf: &[u8], off: usize) -> Option<u16> {
-    buf.get(off..off + 2)?.try_into().ok().map(u16::from_le_bytes)
+    buf.get(off..off + 2)?
+        .try_into()
+        .ok()
+        .map(u16::from_le_bytes)
 }
 
 fn read_le32(buf: &[u8], off: usize) -> Option<u32> {
-    buf.get(off..off + 4)?.try_into().ok().map(u32::from_le_bytes)
+    buf.get(off..off + 4)?
+        .try_into()
+        .ok()
+        .map(u32::from_le_bytes)
 }
 
 fn read_le64(buf: &[u8], off: usize) -> Option<u64> {
-    buf.get(off..off + 8)?.try_into().ok().map(u64::from_le_bytes)
+    buf.get(off..off + 8)?
+        .try_into()
+        .ok()
+        .map(u64::from_le_bytes)
 }
 
 fn sane_version(v: u32) -> bool {
@@ -100,9 +109,75 @@ fn ask_string(prompt: &str) -> String {
     input.trim().to_string()
 }
 
-fn json_filename(input: &Path) -> String {
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    format!("{}_arb.json", stem)
+fn json_filename(device_model: &str, update_label: &str, arb: u32, input: &Path) -> String {
+    let mut stem = String::new();
+
+    // Trim leading/trailing whitespace, slashes, and backslashes
+    let dev = device_model.trim_matches(|c| c == '/' || c == '\\' || c == ' ' || c == '\t');
+    let upd = update_label.trim_matches(|c| c == '/' || c == '\\' || c == ' ' || c == '\t');
+
+    if !dev.is_empty() || !upd.is_empty() {
+        if !dev.is_empty() {
+            stem.push_str(dev);
+        }
+        if !upd.is_empty() {
+            if !stem.is_empty() {
+                stem.push('_');
+            }
+            stem.push_str(upd);
+        }
+    } else {
+        // Fall back to the original file/URL stem parsing
+        let full_str = input.to_string_lossy();
+        let is_url = full_str.starts_with("http://") || full_str.starts_with("https://");
+
+        let base_name = if is_url {
+            // Strip query parameters first
+            let without_query = match full_str.find('?') {
+                Some(pos) => &full_str[..pos],
+                None => &full_str,
+            };
+            // Extract the last component after '/'
+            match without_query.rfind('/') {
+                Some(pos) => &without_query[pos + 1..],
+                None => without_query,
+            }
+        } else {
+            // Otherwise, treat as a local path and use Rust's standard file_stem
+            input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output")
+        };
+
+        // Strip extension (like .zip) if present, but only if it's a URL (local file_stem already stripped it)
+        let mut extracted_stem = base_name;
+        if is_url {
+            if let Some(s) = Path::new(extracted_stem)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            {
+                extracted_stem = s;
+            }
+        }
+        stem.push_str(extracted_stem);
+    }
+
+    // Sanitize any remaining characters that are illegal in Windows/Linux filesystems
+    let sanitized: String = stem
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '?' | '%' | '*' | ':' | '|' | '"' | '<' | '>' | ' ' => '_',
+            _ => c,
+        })
+        .collect();
+
+    let final_stem = if sanitized.is_empty() {
+        "output".to_string()
+    } else {
+        sanitized
+    };
+    format!("{}_ARB({}).json", final_stem, arb)
 }
 
 // HASH header detection
@@ -187,7 +262,8 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
         }
     }
 
-    let xbl_path = xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
+    let xbl_path =
+        xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
 
     match do_run(no_json, &xbl_path, path) {
         Ok(()) => Ok(()),
@@ -232,20 +308,26 @@ fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbErr
 
     for i in 0..e_phnum {
         let off = i * e_phentsz;
-        let Some(buf) = ph_buf.get(off..off + e_phentsz) else { break; };
+        let Some(buf) = ph_buf.get(off..off + e_phentsz) else {
+            break;
+        };
 
-        let Some(p_flags) = read_le32(buf, 4) else { continue; };
-        let Some(p_offset) = read_le64(buf, 8) else { continue; };
-        let Some(p_filesz) = read_le64(buf, 32) else { continue; };
+        let Some(p_flags) = read_le32(buf, 4) else {
+            continue;
+        };
+        let Some(p_offset) = read_le64(buf, 8) else {
+            continue;
+        };
+        let Some(p_filesz) = read_le64(buf, 32) else {
+            continue;
+        };
 
         if p_filesz == 0 || p_offset + p_filesz > file_size {
             continue;
         }
 
         // Must be non-executable, big enough for hash header, under 20MB limit
-        if (p_flags & 0x1) == 0
-            && p_filesz >= HASH_HDR_SIZE as u64
-            && p_filesz <= MAX_SEGMENT_SIZE
+        if (p_flags & 0x1) == 0 && p_filesz >= HASH_HDR_SIZE as u64 && p_filesz <= MAX_SEGMENT_SIZE
         {
             candidates.push((p_offset, p_filesz));
         }
@@ -269,8 +351,12 @@ fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbErr
             continue;
         };
 
-        let Some(common_sz) = read_le32(&shared_buf, hdr + 4) else { continue; };
-        let Some(qti_sz) = read_le32(&shared_buf, hdr + 8) else { continue; };
+        let Some(common_sz) = read_le32(&shared_buf, hdr + 4) else {
+            continue;
+        };
+        let Some(qti_sz) = read_le32(&shared_buf, hdr + 8) else {
+            continue;
+        };
 
         let oem_md_off = hdr + HASH_HDR_SIZE + common_sz as usize + qti_sz as usize;
 
@@ -291,7 +377,9 @@ fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbErr
         }
     }
 
-    let seg = seg.ok_or(ArbError::MissingMetadata("Valid OEM ARB metadata not found"))?;
+    let seg = seg.ok_or(ArbError::MissingMetadata(
+        "Valid OEM ARB metadata not found",
+    ))?;
     let header_off = header_off.unwrap(); // We know this is Some if seg is Some
 
     let common_sz = read_le32(&seg, header_off + 4).unwrap_or(0);
@@ -306,9 +394,13 @@ fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbErr
         println!("[arbscan] Analyzing: {}\n", original_path.display());
     } else {
         let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-        println!("[arbscan] Analyzing: {} (from {})\n", file_name, original_path.display());
+        println!(
+            "[arbscan] Analyzing: {} (from {})\n",
+            file_name,
+            original_path.display()
+        );
     }
-    
+
     println!("OEM Metadata");
     println!("────────────");
     println!("  Major Version : {}", major);
@@ -330,7 +422,12 @@ fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbErr
             hash_size,
         };
 
-        let out = json_filename(original_path);
+        let out = json_filename(
+            &meta.device_model,
+            &meta.update_label,
+            meta.arb,
+            original_path,
+        );
         write(&out, serde_json::to_string_pretty(&meta)?)?;
         println!("\n✔ JSON written: {}", out);
     }
