@@ -124,16 +124,20 @@ For architectural details, see [TECHNICAL.md](TECHNICAL.md)
 
 ### Installation
 
-Prebuilt binaries are available on the
-[Releases](https://github.com/syedinsaf/otaripper/releases) page:
+Prebuilt packaged archives are available on the [Releases](https://github.com/syedinsaf/otaripper/releases) page. Download the archive matching your platform:
 
-* Windows: `otaripper-x86_64-pc-windows-msvc.exe`
-* Linux (glibc): `otaripper-x86_64-unknown-linux-gnu`
-* Linux (musl): `otaripper-x86_64-unknown-linux-musl`
-* macOS (Intel): `otaripper-x86_64-apple-darwin`
-* macOS (Apple Silicon): `otaripper-aarch64-apple-darwin`
+* **Windows (MSVC):** `otaripper-vX.Y.Z-windows-msvc-x86_64.zip`
+* **Windows (GNU):** `otaripper-vX.Y.Z-windows-gnu-x86_64.zip`
+* **Linux (glibc):** `otaripper-vX.Y.Z-linux-x86_64.tar.gz`
+* **Linux (static/musl):** `otaripper-vX.Y.Z-linux-static-x86_64.tar.gz`
+* **Linux (ARM64):** `otaripper-vX.Y.Z-linux-arm64.tar.gz`
+* **macOS (Intel):** `otaripper-vX.Y.Z-macos-x86_64.tar.gz`
+* **macOS (Apple Silicon):** `otaripper-vX.Y.Z-macos-arm64.tar.gz`
+* **Android / Termux (ARM64):** `otaripper-vX.Y.Z-android-arm64.zip`
 
-> **Note:** Each release also includes `otaripper-lite` binaries. These are compiled without remote HTTP extraction features (`--no-default-features`), resulting in an ultra-minimal footprint for users who only extract local files.
+Once extracted, you will find the main executable cleanly named **`otaripper`** (or `otaripper.exe` on Windows).
+
+> **Note:** Each release also includes an ultra-minimalist `otaripper-lite` executable alongside the main binary. The lite version is compiled without remote HTTP streaming capabilities (`--no-default-features`), resulting in an exceptionally compact footprint for users only performing local extractions.
 
 ### Verifying Downloads
 
