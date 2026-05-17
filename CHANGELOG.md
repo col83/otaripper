@@ -2,13 +2,23 @@
 
 ## **otaripper v3.1.1** (2026-05-17)
 
-### Modern Qualcomm ARB Metadata Support
+### Modern Qualcomm ARB & Supercharged JSON UX
 
-This release fixes a critical validation constraint in the bootloader ARB scanning logic (`arbscan` subcommand) to support modern Snapdragon devices.
+This release introduces a critical validation update to support modern Snapdragon bootloaders alongside a highly polished, robust, and interactive JSON metadata export workflow.
 
-* **Relaxed Hash Table Validation Check**
+* **Support for Modern Qualcomm SoCs (Snapdragon 8 Gen 1/2/3)**
   * Updated [`find_hash_header`](file:///e:/Downloads/Music/otaripper/src/cmd/arbscan.rs#L109-L145) to accept hash table sizes that are a multiple of 16 (using mask `& 0xF`) instead of strictly requiring a multiple of 32 (using mask `& 0x1F`).
-  * This successfully resolves scanning failures on newer Snapdragon devices (such as Snapdragon 8 Gen 1, Gen 2, and Gen 3) which utilize **SHA-384** (48-byte digests) for Secure Boot validation, while remaining compatible with older **SHA-256** bootloaders and future-proofing the engine for potential **SHA-512** (64-byte digests) implementations.
+  * This successfully resolves scanning failures on newer Snapdragon devices utilizing **SHA-384** (48-byte digests) for Secure Boot validation, while remaining compatible with older **SHA-256** bootloaders and future-proofing the engine for potential **SHA-512** (64-byte digests) implementations.
+
+* **Robust URL & Signed URL Parsing**
+  * Implemented an advanced, URL-aware and platform-independent file stem parser that cleanly strips out complex query parameters, CDN expiry tags, and schemes, sanitizing all remaining filesystem-unfriendly characters to prevent crashes on Windows during JSON output writes.
+
+* **Descriptive Prompt-Driven JSON Filenames**
+  * When exporting analyzed ARB metadata, the CLI now dynamically names the output JSON file using the user-supplied "Device model" and "Update / build" fields (e.g. `op12_10.1.100_ARB(0).json` instead of a vague CDN hash stem like `63ad71bd5de042d7aaff5b01496dc12b_arb.json`), making files instantly recognizable at a glance.
+
+* **Polished Input Cleansing & Suffix Formatting**
+  * Pre-trims spaces, slashes, and backslashes from user prompts (like `16.0.7.500\`) to ensure clean filenames without duplicate underscores.
+  * Automatically appends the actual Anti-Rollback (ARB) index level as an `_ARB(N).json` suffix to both custom inputs and fallback file stems.
 
 ---
 
