@@ -228,20 +228,26 @@ Analyze Qualcomm bootloader Anti-Rollback (ARB) metadata (accepts `.img`, `.bin`
 otaripper arb update.zip
 ```
 
-🌐 **Remote ARB Inspection (Zero-Download):**
+🌐 **Remote ARB Inspection (Zero-Download) & Interactive Export:**
 
-Instantly check the ARB index of a firmware update without downloading the massive 3GB+ zip file! `otaripper` will intelligently stream and extract just the tiny `xbl_config.img` directly from the URL over the internet.
+Instantly check the ARB index of a firmware update without downloading the massive 3GB+ zip file! `otaripper` will intelligently stream and extract just the tiny `xbl_config.img` directly from the URL over the internet. You can optionally export the metadata into a beautifully formatted, platform-sanitized JSON file named dynamically after your device model, software build, and ARB index:
 
 ```text
-$ otaripper arb https://example.com/firmware.zip -n
+$ otaripper arb https://example.com/firmware.zip
 [arbscan] OTA package detected. Extracting xbl_config.img temporarily...
-[arbscan] Analyzing: xbl_config.img
+[arbscan] Analyzing: xbl_config.img (from https://example.com/firmware.zip)
 
 OEM Metadata
 ────────────
   Major Version : 3
   Minor Version : 0
   ARB Index     : 0
+
+Write JSON output? [y/N]: y
+Device model      : op12
+Update / build    : 10.1.100
+
+✔ JSON written: op12_10.1.100_ARB(0).json
 ```
 
 ---

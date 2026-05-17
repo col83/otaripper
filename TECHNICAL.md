@@ -14,6 +14,7 @@ This document provides detailed technical information about **otaripper’s** ar
 * [SIMD Optimization](#simd-optimization)
 * [Remote Extraction Architecture](#remote-extraction-architecture)
 * [Verification Pipeline](#verification-pipeline)
+* [Qualcomm Bootloader ARB Analysis](#qualcomm-bootloader-arb-analysis)
 * [Parallel Extraction](#parallel-extraction)
 * [Reliability and Failure Handling](#reliability-and-failure-handling)
 * [Performance Architecture](#performance-architecture)
@@ -282,6 +283,41 @@ Disabled only with `--no-verify`.
 | `--strict`    | ✅     | ✅   | enforced    | Maximum safety  |
 | `--no-verify` | ✅     | ❌   | ❌           | Trusted sources |
 | `--sanity`    | ✅     | ✅   | +zero-check | Analysis        |
+---
+
+## Qualcomm Bootloader ARB Analysis
+
+The `arb` (or `arbscan`) subcommand performs low-level ELF structural analysis and Secure Boot integrity checks on Qualcomm Extensible Bootloader configurations (`xbl_config.img`). 
+
+### 1. Zero-Download Payload Extraction
+When given a full local or remote OTA ZIP package, `otaripper` does not unpack the entire payload. Instead, it coordinates with the `Extractor` to stream only the exact block ranges of the tiny `xbl_config` partition from the remote server, performing the analysis within milliseconds.
+
+### 2. ELF Header & Program Header Table Parsing
+* **Magic Validation**: The engine inspects the ELF identification bytes (`\x7fELF`) to verify a valid little-endian ELF64 layout (`ELFCLASS64`, `ELFDATA2LSB`).
+* **Program Header Navigation**: Extracts the program header table offset (`e_phoff`) and entries count (`e_phnum`).
+* **Segment Filtering**: Iterates through program segments under **20 MB** (`MAX_SEGMENT_SIZE`) to filter candidates for the Secure Boot `HASH` metadata partition, enforcing that the target segment is non-executable (`(p_flags & 0x1) == 0`).
+
+### 3. Multi-Digest Secure Boot Verification (SHA-256 / SHA-384)
+To parse the Secure Boot hash table header safely, the engine scans the program segment for the structured Qualcomm `HASH` header signature block:
+* **The Constraint**: The hash table size must be fully aligned with the cryptographic digest width used by the bootloader.
+* **Modern SoC Adaptability**: Older Snapdragon chips strictly used **SHA-256** (32-byte digests), meaning `hash_tbl_sz` was always a multiple of 32 (`(hash_tbl_sz & 0x1F) == 0`). Modern Qualcomm SoCs (such as Snapdragon 8 Gen 1, Gen 2, and Gen 3) utilize **SHA-384** (48-byte digests) for Secure Boot.
+* **Universal 16-Byte Mask**: To support both legacy and modern SoC architectures seamlessly without code duplication or extra libraries, the validation routine evaluates the size against a **16-byte alignment mask**:
+  $$\text{hash\_tbl\_sz} \pmod{16} \equiv 0 \implies (\text{hash\_tbl\_sz} \ \& \ \text{0xF}) == 0$$
+  This allows both SHA-256 (32) and SHA-384 (48) tables to pass validation, and future-proofs the CLI for potential SHA-512 (64) bootloaders.
+
+### 4. OEM Metadata Retrieval
+Once the `HASH` header is located, the parser computes the offset for the OEM metadata block:
+$$\text{Offset}_{\text{OEM}} = \text{Offset}_{\text{HASH}} + 36 + \text{common\_sz} + \text{qti\_sz}$$
+It reads the little-endian fields to retrieve the target:
+* `Major Version`
+* `Minor Version`
+* `ARB Index (Anti-Rollback Level)`
+
+### 5. Safe, URL-Sanitized Metadata Export
+When writing JSON outputs, the engine pre-processes inputs to ensure strict filesystem safety:
+* **CDN URL Expiry Cleansing**: Strips protocol schemes and complex query string parameters (which contain illegal Windows filesystem characters like `?`, `&`, or `=`) before generating the output filename.
+* **User Input Sanitization**: Pre-cleanses spaces, slashes, and backslashes (e.g. `16.0.7.500\`) to eliminate duplicate underscores in the generated filename.
+* **ARB Level Suffixing**: Automatically appends the actual Anti-Rollback index to the final filename (as `_ARB(N).json`), making the level instantly readable on disk.
 
 ---
 
