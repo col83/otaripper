@@ -1,6 +1,6 @@
 [package]
 name = "otaripper"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2024"
 rust-version = "1.95.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
@@ -14,7 +14,11 @@ readme = "README.md"
 [dependencies]
 anyhow = "1.0.102"
 bzip2 = "0.6.1"
-reqwest = { version = "0.12.9", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "hickory-dns"], optional = true }
+reqwest = { version = "0.12.9", default-features = false, features = [
+  "blocking",
+  "rustls-tls-webpki-roots",
+  "hickory-dns",
+], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 chrono = "0.4.44"
