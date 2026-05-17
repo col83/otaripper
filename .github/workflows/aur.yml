@@ -8,6 +8,7 @@ on:
 jobs:
   update-aur:
     name: Update AUR (${{ matrix.package }})
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest

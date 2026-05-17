@@ -11,6 +11,7 @@ on:
 jobs:
   publish:
     name: Publish to Winget
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     steps:
       - name: Get latest release version

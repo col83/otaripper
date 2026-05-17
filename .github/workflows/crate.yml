@@ -12,6 +12,7 @@ on:
 jobs:
   publish:
     name: Publish to Crates.io
+    if: github.event.repository.fork == false
     runs-on: ubuntu-latest
     environment: production
     steps:

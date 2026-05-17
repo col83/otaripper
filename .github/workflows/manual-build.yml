@@ -16,6 +16,7 @@ jobs:
 # =========================
   linux-matrix:
     runs-on: ubuntu-latest
+    if: github.event.repository.fork == false
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +97,7 @@ jobs:
 # =========================
   windows-matrix:
     runs-on: windows-latest
+    if: github.event.repository.fork == false
     strategy:
       fail-fast: false
       matrix:
@@ -148,6 +150,7 @@ jobs:
 # =========================
   macos-matrix:
     runs-on: macos-latest
+    if: github.event.repository.fork == false
     strategy:
       matrix:
         include:
@@ -200,6 +203,7 @@ jobs:
 # =========================
   android-arm64:
     runs-on: ubuntu-latest
+    if: github.event.repository.fork == false
 
     steps:
       - uses: actions/checkout@v6
