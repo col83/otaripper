@@ -243,6 +243,26 @@ impl<'a> Extractor<'a> {
 
         let payload_path_str = payload_path.to_str().context("Path is not valid UTF-8")?;
 
+        let metadata = crate::cmd::metadata::fetch_metadata(payload_path_str);
+        if let Some(ref meta) = metadata {
+            if !self.cmd.quiet {
+                println!("Firmware Information");
+                println!("────────────────────");
+                let display_keys = [
+                    ("version_name", "OS Version"),
+                    ("oplus_rom_version", "ColorOS/OxygenOS Version"),
+                    ("ota_target_version", "OTA Target Version"),
+                    ("security_patch", "Security Patch"),
+                ];
+                for (key, label) in display_keys.iter() {
+                    if let Some(value) = meta.get(*key) {
+                        println!("{:<26} : {}", label, value);
+                    }
+                }
+                println!();
+            }
+        }
+
         let payload_source = self.open_payload_file(payload_path_str)?;
         let payload_parsed = match &payload_source {
             #[cfg(feature = "remote")]
@@ -449,7 +469,7 @@ impl<'a> Extractor<'a> {
         }
 
         // Create/ensure output directory and detect if it was newly created
-        let (partition_dir, created_new_dir) = self.create_partition_dir()?;
+        let (partition_dir, created_new_dir) = self.create_partition_dir(metadata.as_ref())?;
 
         let cleanup_state = Arc::new(Mutex::new(CleanupState {
             files: Vec::new(),
@@ -1664,9 +1684,15 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
-    fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
+    fn create_partition_dir(&self, metadata: Option<&std::collections::HashMap<String, String>>) -> Result<(PathBuf, bool)> {
         let now = Local::now();
-        let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
+        let os_version = metadata.and_then(|m| m.get("version_name").map(|v| v.as_str()));
+        let os_version_safe = os_version.map(|v| v.replace(|c| c == '/' || c == '\\' || c == ' ' || c == ':', "_"));
+        let timestamp_folder = if let Some(v) = os_version_safe {
+            format!("extracted_{}_{}", v, now.format("%Y-%m-%d_%H-%M-%S"))
+        } else {
+            format!("extracted_{}", now.format("%Y-%m-%d_%H-%M-%S"))
+        };
 
         let dir = match &self.cmd.output_dir {
             Some(output_base) => output_base.join(&timestamp_folder),
