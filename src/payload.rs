@@ -145,7 +145,10 @@ impl<'a> Payload<'a> {
         let manifest_size = u64::from_be_bytes(manifest_buf[12..20].try_into().unwrap());
 
         let (header_size, sig_size) = if file_format_version >= 2 {
-            (24, u32::from_be_bytes(manifest_buf[20..24].try_into().unwrap()) as usize)
+            (
+                24,
+                u32::from_be_bytes(manifest_buf[20..24].try_into().unwrap()) as usize,
+            )
         } else {
             (20, 0)
         };

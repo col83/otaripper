@@ -243,12 +243,40 @@ impl<'a> Extractor<'a> {
 
         let payload_path_str = payload_path.to_str().context("Path is not valid UTF-8")?;
 
+        let metadata = crate::cmd::metadata::fetch_metadata(payload_path_str);
+        if let Some(ref meta) = metadata {
+            if !self.cmd.quiet {
+                println!("Firmware Information");
+                println!("────────────────────");
+                let display_keys = [
+                    ("version_name", "OS Version"),
+                    ("oplus_rom_version", "ColorOS/OxygenOS Version"),
+                    ("ota_target_version", "OTA Target Version"),
+                    ("security_patch", "Security Patch"),
+                ];
+                for (key, label) in display_keys.iter() {
+                    if let Some(value) = meta.get(*key) {
+                        println!("{:<26} : {}", label, value);
+                    }
+                }
+                println!();
+            }
+        }
+
         let payload_source = self.open_payload_file(payload_path_str)?;
         let payload_parsed = match &payload_source {
             #[cfg(feature = "remote")]
-            PayloadSource::Remote { manifest_buf, url, payload_base_offset, client } => {
-                Payload::parse_remote(manifest_buf, url.clone(), *payload_base_offset, client.clone())?
-            }
+            PayloadSource::Remote {
+                manifest_buf,
+                url,
+                payload_base_offset,
+                client,
+            } => Payload::parse_remote(
+                manifest_buf,
+                url.clone(),
+                *payload_base_offset,
+                client.clone(),
+            )?,
             local_source => {
                 let bytes: &[u8] = match local_source {
                     PayloadSource::Mapped(m) => m,
@@ -449,7 +477,7 @@ impl<'a> Extractor<'a> {
         }
 
         // Create/ensure output directory and detect if it was newly created
-        let (partition_dir, created_new_dir) = self.create_partition_dir()?;
+        let (partition_dir, created_new_dir) = self.create_partition_dir(metadata.as_ref())?;
 
         let cleanup_state = Arc::new(Mutex::new(CleanupState {
             files: Vec::new(),
@@ -530,7 +558,10 @@ impl<'a> Extractor<'a> {
             } else {
                 "Unknown panic"
             };
-            let location = panic_info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_else(|| "unknown location".to_string());
+            let location = panic_info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
             eprintln!("\n FATAL THREAD PANIC at {}: {}", location, msg);
             if let Ok(state) = cleanup_state_clone.lock() {
                 // Try to remove created files
@@ -579,9 +610,15 @@ impl<'a> Extractor<'a> {
 
             // create all bars upfront so the network bar stays at the bottom
             let mut pending_partitions = Vec::new();
-            for (hash_index_counter, update) in manifest.partitions.iter().filter(|u| {
-                self.cmd.partitions.is_empty() || self.cmd.partitions.contains(&u.partition_name)
-            }).enumerate() {
+            for (hash_index_counter, update) in manifest
+                .partitions
+                .iter()
+                .filter(|u| {
+                    self.cmd.partitions.is_empty()
+                        || self.cmd.partitions.contains(&u.partition_name)
+                })
+                .enumerate()
+            {
                 let pb = multiprogress.add(self.create_progress_bar(update)?);
                 pending_partitions.push((hash_index_counter, update, pb));
             }
@@ -589,7 +626,9 @@ impl<'a> Extractor<'a> {
             // append the global network monitor bar below the partition bars
             #[cfg(feature = "remote")]
             {
-                if payload_path_str.starts_with("http://") || payload_path_str.starts_with("https://") {
+                if payload_path_str.starts_with("http://")
+                    || payload_path_str.starts_with("https://")
+                {
                     let mut total_down_size = 0u64;
                     for (_, update, _) in &pending_partitions {
                         for op in &update.operations {
@@ -598,12 +637,14 @@ impl<'a> Extractor<'a> {
                     }
 
                     let bar_style = ProgressStyle::with_template(
-                        "\n{prefix:.cyan.bold} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})"
-                    ).unwrap();
-                    
-                    let bar_pb = multiprogress.add(ProgressBar::new(total_down_size).with_style(bar_style));
+                        "\n{prefix:.cyan.bold} {bytes}/{total_bytes} ({bytes_per_sec}, ETA: {eta})",
+                    )
+                    .unwrap();
+
+                    let bar_pb =
+                        multiprogress.add(ProgressBar::new(total_down_size).with_style(bar_style));
                     bar_pb.set_prefix("Network:");
-                    bar_pb.enable_steady_tick(std::time::Duration::from_millis(200)); 
+                    bar_pb.enable_steady_tick(std::time::Duration::from_millis(200));
                     let ok = crate::remote::GLOBAL_NETWORK_STATUS.set(bar_pb).is_ok();
                     debug_assert!(ok, "GLOBAL_NETWORK_STATUS set more than once");
                 }
@@ -775,7 +816,7 @@ impl<'a> Extractor<'a> {
                 simd,
                 &progress_bar,
             ) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                     ctx.cancellation_token.store(true, Ordering::Release);
                     if slot.is_none() {
@@ -1099,21 +1140,27 @@ impl<'a> Extractor<'a> {
                     total_dst_size,
                     simd,
                 )?;
-                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) {
+                    pb.inc(total_dst_size as u64);
+                }
                 Ok(())
             }
             Type::ReplaceBz => {
                 let data = self.extract_data(op, payload, pb, total_dst_size)?;
                 let mut decoder = BzDecoder::new(&*data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
-                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) {
+                    pb.inc(total_dst_size as u64);
+                }
                 Ok(())
             }
             Type::ReplaceXz => {
                 let data = self.extract_data(op, payload, pb, total_dst_size)?;
                 let mut decoder = liblzma::read::XzDecoder::new(&*data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
-                if matches!(payload.data, crate::payload::PayloadData::Local(_)) { pb.inc(total_dst_size as u64); }
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) {
+                    pb.inc(total_dst_size as u64);
+                }
                 Ok(())
             }
             Type::Zero | Type::Discard => {
@@ -1263,10 +1310,10 @@ impl<'a> Extractor<'a> {
                 // we will check for build.prop (Android) and resolv.conf (Linux)
                 let is_android = std::path::Path::new("/system/build.prop").exists();
                 let has_resolv_conf = std::path::Path::new("/etc/resolv.conf").exists();
-                
+
                 // compile time detect Windows (which lacks resolv.conf but should use Hickory)
                 let is_windows = cfg!(target_os = "windows");
-                
+
                 // Only use Hickory if we are NOT on Android, and we either have resolv.conf or we are on Windows
                 let use_hickory = !is_android && (has_resolv_conf || is_windows);
 
@@ -1283,39 +1330,45 @@ impl<'a> Extractor<'a> {
                 // Initialize a spinner for the initial setup phase
                 let spinner = indicatif::ProgressBar::new_spinner();
                 spinner.set_style(
-                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap()
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap(),
                 );
                 spinner.enable_steady_tick(std::time::Duration::from_millis(69));
 
-                let mut reader = crate::remote::CachingHttpReader::new(client.clone(), path_str, &spinner)?;
-                
+                let mut reader =
+                    crate::remote::CachingHttpReader::new(client.clone(), path_str, &spinner)?;
+
                 // revert to a simple spinner for parsing (exact bytes are unknown here)
                 spinner.set_style(
-                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap()
+                    indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap(),
                 );
                 spinner.set_message("Parsing remote payload metadata...");
 
                 let mut magic = [0u8; 4];
-                reader.read_exact(&mut magic).context("Failed to read remote header")?;
+                reader
+                    .read_exact(&mut magic)
+                    .context("Failed to read remote header")?;
                 reader.seek(std::io::SeekFrom::Start(0))?;
 
                 let mut base_offset = 0;
                 if &magic == b"PK\x03\x04" {
                     spinner.set_message("Locating payload.bin inside remote ZIP...");
                     let mut archive = ZipArchive::new(&mut reader)?;
-                    let zipfile = archive.by_name("payload.bin")
+                    let zipfile = archive
+                        .by_name("payload.bin")
                         .context("Your ZIP URL does not contain payload.bin")?;
-                    base_offset = zipfile.data_start().context("Failed to find data_start inside ZIP URL")?;
+                    base_offset = zipfile
+                        .data_start()
+                        .context("Failed to find data_start inside ZIP URL")?;
                 }
 
                 spinner.set_message("Reading payload headers...");
                 reader.seek(std::io::SeekFrom::Start(base_offset))?;
                 let mut header = [0u8; 24];
                 reader.read_exact(&mut header)?;
-                
+
                 let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
                 let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
-                
+
                 // prevent exabyte OOM panics from malicious servers sending garbage data
                 // max manifest size is 256MB, anything larger is mathematically a rogue server
                 anyhow::ensure!(
@@ -1325,9 +1378,14 @@ impl<'a> Extractor<'a> {
                 );
 
                 let (header_size, sig_size) = if file_format_version >= 2 {
-                    (24, u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize)
-                } else { (20, 0) };
-                
+                    (
+                        24,
+                        u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize,
+                    )
+                } else {
+                    (20, 0)
+                };
+
                 let total_metadata_size = header_size + manifest_size as usize + sig_size;
 
                 // change the spinner into a real little progress bar for the manifest download!
@@ -1346,14 +1404,17 @@ impl<'a> Extractor<'a> {
                     base_offset,
                     total_metadata_size,
                     &spinner,
-                    total_metadata_size
+                    total_metadata_size,
                 )?;
-                
+
                 // vanish the initialization spinner entirely so the normal extraction bars can cleanly show up
                 spinner.finish_and_clear();
-                
+
                 return Ok(PayloadSource::Remote {
-                    manifest_buf, url: path_str.to_string(), payload_base_offset: base_offset, client
+                    manifest_buf,
+                    url: path_str.to_string(),
+                    payload_base_offset: base_offset,
+                    client,
                 });
             }
 
@@ -1526,7 +1587,13 @@ impl<'a> Extractor<'a> {
     }
 
     #[allow(unused_variables)]
-    fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload, pb: &ProgressBar, total_dst_size: usize,) -> Result<std::borrow::Cow<'b, [u8]>> {
+    fn extract_data<'b>(
+        &self,
+        op: &InstallOperation,
+        payload: &'b Payload,
+        pb: &ProgressBar,
+        total_dst_size: usize,
+    ) -> Result<std::borrow::Cow<'b, [u8]>> {
         let data_len = op.data_length.context("data_length not defined")? as usize;
         let offset = op.data_offset.context("data_offset not defined")? as usize;
 
@@ -1543,11 +1610,22 @@ impl<'a> Extractor<'a> {
                     local_slice.len()
                 );
                 std::borrow::Cow::Borrowed(&local_slice[offset..end_offset])
-            },
+            }
             #[cfg(feature = "remote")]
-            crate::payload::PayloadData::Remote { url, data_offset, client } => {
+            crate::payload::PayloadData::Remote {
+                url,
+                data_offset,
+                client,
+            } => {
                 let start = data_offset + offset as u64;
-                let buf = crate::remote::fetch_http_chunk(client, url, start, data_len, pb, total_dst_size)?;
+                let buf = crate::remote::fetch_http_chunk(
+                    client,
+                    url,
+                    start,
+                    data_len,
+                    pb,
+                    total_dst_size,
+                )?;
                 std::borrow::Cow::Owned(buf)
             }
         };
@@ -1664,9 +1742,19 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
-    fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
+    fn create_partition_dir(
+        &self,
+        metadata: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<(PathBuf, bool)> {
         let now = Local::now();
-        let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
+        let os_version = metadata.and_then(|m| m.get("version_name").map(|v| v.as_str()));
+        let os_version_safe =
+            os_version.map(|v| v.replace(|c| c == '/' || c == '\\' || c == ' ' || c == ':', "_"));
+        let timestamp_folder = if let Some(v) = os_version_safe {
+            format!("extracted_{}_{}", v, now.format("%Y-%m-%d_%H-%M-%S"))
+        } else {
+            format!("extracted_{}", now.format("%Y-%m-%d_%H-%M-%S"))
+        };
 
         let dir = match &self.cmd.output_dir {
             Some(output_base) => output_base.join(&timestamp_folder),
@@ -1707,11 +1795,12 @@ impl<'a> Extractor<'a> {
             "Total extracted size: {}",
             indicatif::HumanBytes(total_size)
         );
-        
+
         // print Network Bytes if anywere downloaded
         #[cfg(feature = "remote")]
         {
-            let net_bytes = crate::remote::NETWORK_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
+            let net_bytes =
+                crate::remote::NETWORK_BYTES_READ.load(std::sync::atomic::Ordering::Relaxed);
             if net_bytes > 0 {
                 let bold_cyan = Style::new().bold().cyan();
                 println!(
@@ -1774,30 +1863,34 @@ impl<'a> Extractor<'a> {
         // Cross-platform folder opening
         cfg_select! {
             target_os = "windows" => {
-                use std::process::Command;
+                use std::process::{Command, Stdio};
                 let _ = Command::new("explorer")
                     .arg(dir_path)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
             }
             target_os = "macos" => {
-                use std::process::Command;
+                use std::process::{Command, Stdio};
                 let _ = Command::new("open")
                     .arg(dir_path)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
             }
             target_os = "linux" => {
-                use std::process::Command;
+                use std::process::{Command, Stdio};
 
                 // On KDE, using xdg-open triggers a harmless but noisy Qt portal warning (related to kioclient registration).
                 // Spawning Dolphin directly avoids this, while still opening the folder correctly.
-                if Command::new("dolphin").arg(dir_path).spawn().is_ok() {
+                if Command::new("dolphin").arg(dir_path).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok() {
                     return Ok(());
                 }
 
                 // Fallback to standard xdg-open for non-KDE desktops
-                if Command::new("xdg-open").arg(dir_path).spawn().is_ok() {
+                if Command::new("xdg-open").arg(dir_path).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok() {
                     return Ok(());
                 }
 

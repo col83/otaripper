@@ -213,6 +213,8 @@ fn find_hash_header(seg: &[u8]) -> Option<usize> {
 }
 
 pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
+    let metadata = crate::cmd::metadata::fetch_metadata(path.to_str().unwrap_or(""));
+
     // Detect magic bytes
     let mut magic = [0u8; 4];
     if let Ok(mut f) = File::open(path) {
@@ -221,7 +223,7 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
 
     if magic == [0x7f, b'E', b'L', b'F'] {
         // Direct ELF image
-        return match do_run(no_json, path, path) {
+        return match do_run(no_json, path, path, metadata) {
             Ok(()) => Ok(()),
             Err(e) => anyhow::bail!("{}", e),
         };
@@ -265,13 +267,18 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
     let xbl_path =
         xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
 
-    match do_run(no_json, &xbl_path, path) {
+    match do_run(no_json, &xbl_path, path, metadata) {
         Ok(()) => Ok(()),
         Err(e) => anyhow::bail!("{}", e),
     }
 }
 
-fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbError> {
+fn do_run(
+    no_json: bool,
+    path: &Path,
+    original_path: &Path,
+    metadata: Option<std::collections::HashMap<String, String>>,
+) -> Result<(), ArbError> {
     let mut file = File::open(path)?;
 
     let mut ehdr = [0u8; 64];
@@ -408,8 +415,35 @@ fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbErr
     println!("  ARB Index     : {}", arb);
 
     if !no_json && ask_yes_no("\nWrite JSON output? [y/N]: ") {
-        let device_model = ask_string("Device model      : ");
-        let update_label = ask_string("Update / build    : ");
+        let mut device_model = String::new();
+        let mut update_label = String::new();
+        let mut fully_auto = false;
+
+        if let Some(meta) = &metadata {
+            if let Some(ver) = meta.get("version_name").or(meta.get("ota_target_version")) {
+                update_label = ver.clone();
+                fully_auto = true;
+            } else if let Some(dev) = meta.get("post-device").or(meta.get("pre-device")) {
+                device_model = dev.clone();
+            }
+        }
+
+        if fully_auto {
+            // We have a solid OS version, skip the device model prompt entirely
+            println!("Update / build    : {}", update_label);
+        } else {
+            // We couldn't confidently extract the version, ask the user
+            if !device_model.is_empty() {
+                let input = ask_string(&format!("Device model (default: {}): ", device_model));
+                if !input.trim().is_empty() {
+                    device_model = input.trim().to_string();
+                }
+            } else {
+                device_model = ask_string("Device model      : ");
+            }
+
+            update_label = ask_string("Update / build    : ");
+        }
 
         let meta = ArbMetadata {
             device_model,

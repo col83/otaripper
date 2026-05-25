@@ -3,7 +3,7 @@
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
 > **v3.1 Note:**
-> This release introduces Parallel Chunked HTTP Streaming and massive network resilience hardening. It features multi-threaded Range requests, a dedicated bandwidth monitor, and dynamic resolver selection to ensure flawless remote extraction across Linux, Windows, and Android environments.
+> This release introduces Parallel Chunked HTTP Streaming and massive network resilience hardening. It features multi-threaded Range requests, a dedicated bandwidth monitor, and dynamic resolver selection to ensure flawless remote extraction across Linux, Windows, and Android environments. **v3.1.2** adds smart firmware metadata extraction, dynamic folder naming, and GUI terminal silencing.
 
 ---
 
@@ -313,8 +313,9 @@ It reads the little-endian fields to retrieve the target:
 * `Minor Version`
 * `ARB Index (Anti-Rollback Level)`
 
-### 5. Safe, URL-Sanitized Metadata Export
+### 5. Smart Auto-Detection & Sanitized Export
 When writing JSON outputs, the engine pre-processes inputs to ensure strict filesystem safety:
+* **Firmware Auto-Detection**: Automatically parses `META-INF/com/android/metadata` to extract the OS version, skipping manual prompts and writing directly to `CPH2573_15.0.0.860(EX01)_ARB(N).json`.
 * **CDN URL Expiry Cleansing**: Strips protocol schemes and complex query string parameters (which contain illegal Windows filesystem characters like `?`, `&`, or `=`) before generating the output filename.
 * **User Input Sanitization**: Pre-cleanses spaces, slashes, and backslashes (e.g. `16.0.7.500\`) to eliminate duplicate underscores in the generated filename.
 * **ARB Level Suffixing**: Automatically appends the actual Anti-Rollback index to the final filename (as `_ARB(N).json`), making the level instantly readable on disk.

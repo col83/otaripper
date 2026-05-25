@@ -1,5 +1,25 @@
 # Changelog
 
+## **otaripper v3.2.0** (Unreleased)
+
+### Smart Firmware Metadata & UX Refinements
+
+This release significantly enhances the user experience by automatically parsing firmware metadata to enrich CLI outputs, extraction folder names, and ARB JSON exports, while also silencing notorious Linux GUI errors.
+
+* **Firmware Information Extraction**
+  * `otaripper` now automatically parses `META-INF/com/android/metadata` and `payload_properties.txt` from OTA zips before extraction begins.
+  * Prints a beautiful "Firmware Information" banner detailing OS Version, Security Patch, and OTA Target versions directly in the terminal.
+* **Dynamic Output Folder Naming**
+  * The extraction output directory is now dynamically named using the actual OS version string if found (e.g., `extracted_CPH2573_15.0.0.860(EX01)_2026-05-25...`) instead of just a generic timestamp.
+* **Intelligent ARB Auto-Detection**
+  * The `arb` subcommand now automatically inherits the firmware metadata parsing logic.
+  * It auto-detects the device model and OS version, securely skipping the manual user prompts and directly formatting the JSON output file (e.g., `CPH2573_15.0.0.860(EX01)_ARB(0).json`).
+  * Gracefully falls back to offering detected metadata as a default suggestion for custom ROMs missing complete version strings.
+* **Silenced Qt Terminal Spam**
+  * Explicitly redirects `stdout` and `stderr` to `/dev/null` when spawning GUI file managers (like Dolphin) post-extraction, completely silencing the notorious `QPixmap::scaled: Pixmap is a null pixmap` Linux terminal spam.
+
+---
+
 ## **otaripper v3.1.1** (2026-05-17)
 
 ### Modern Qualcomm ARB & Supercharged JSON UX
