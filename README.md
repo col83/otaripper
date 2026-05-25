@@ -64,20 +64,25 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-|                         | otaripper v3.1 | payload-dumper-go | payload_dumper (Python) |
-| ----------------------- | -------------- | ----------------- | ----------------------- |
-| Output verification     | ✅ SHA-256      | ❌                | ❌                      |
-| Remote HTTP Streaming   | ✅ (Parallel)   | ❌                | ❌                      |
-| SIMD optimization       | ✅ AVX-512 / AVX2 / SSE2 | ❌        | ❌                      |
-| Cache-aware large writes| ✅              | ❌                | ❌                      |
-| Graceful interruption   | ✅              | ❌                | ❌                      |
-| Auto-cleanup on failure | ✅              | ❌                | ❌                      |
-| Performance statistics  | ✅              | ❌                | ❌                      |
-| Selective extraction    | ✅              | ✅                | ✅                      |
-| Direct ZIP Memory Mapping| ✅ (Zero-Copy)  | ❌ (Extracts temp)| ❌                      |
-| Multi-threaded          | ✅              | ✅                | ❌ (single-threaded)    |
-| Cross-platform          | ✅              | ✅                | ⚠️ Requires Python     |
-| Standalone binary       | ✅              | ✅                | ❌                      |
+| Feature | otaripper v3.2 | payload-dumper-go | payload_dumper (Python) |
+| :--- | :---: | :---: | :---: |
+| **Output verification** | ✅ SHA-256 | ❌ | ❌ |
+| **Remote HTTP Streaming** | ✅ (Parallel) | ❌ | ❌ |
+| **Network Error Recovery** | ✅ (Auto-resume) | ❌ | ❌ |
+| **SIMD optimization** | ✅ AVX-512/AVX2 | ❌ | ❌ |
+| **Qualcomm ARB Analysis** | ✅ | ❌ | ❌ |
+| **Firmware Metadata parsing** | ✅ | ❌ | ❌ |
+| **Corrupt Image Detection** | ✅ (Sanity checks) | ❌ | ❌ |
+| **Cache-aware large writes** | ✅ | ❌ | ❌ |
+| **Zero-Copy Decompression** | ✅ | ❌ | ❌ |
+| **Direct ZIP Memory Mapping** | ✅ | ❌ (Extracts temp) | ❌ |
+| **Graceful interruption** | ✅ | ❌ | ❌ |
+| **Auto-cleanup on failure** | ✅ | ❌ | ❌ |
+| **Performance statistics** | ✅ | ❌ | ❌ |
+| **Selective extraction** | ✅ | ✅ | ✅ |
+| **Multi-threaded** | ✅ | ✅ | ❌ (1 thread) |
+| **Cross-platform** | ✅ | ✅ | ⚠️ Python |
+| **Standalone binary** | ✅ | ✅ | ❌ |
 
 > otaripper is designed to fail early and cleanly rather than produce questionable output.
 
@@ -91,6 +96,7 @@ Version **3.1** introduces parallel chunked Remote HTTP Streaming and massive I/
 
 * **Parallel HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, using multiple parallel 8MB chunked requests to saturate your bandwidth.
 * **Network Resilience**: Built-in automatic retries with exponential backoff and real-time offline detection. Never fail an extraction due to a temporary connection drop again.
+* **Smart Firmware Metadata**: Automatically parses OS Version and Security Patches from the ZIP, printing a beautiful info banner and using the OS version to dynamically name the output extraction folder.
 * **Direct ZIP Memory Mapping**: Bypasses the traditional temp-file extraction step for `STORED` OTA zips, mapping the internal `payload.bin` straight from the disk using a zero-copy offset.
 * **Modern Decompression Engine**: Upgraded `liblzma` backend safely handles modern Android payloads utilizing the ARM64 BCJ filter (e.g., Xiaomi HyperOS).
 * **Modular Engine Architecture**: Breaking the monolithic extraction logic into specialized `extractor` and `simd` modules.
@@ -248,10 +254,9 @@ OEM Metadata
   ARB Index     : 0
 
 Write JSON output? [y/N]: y
-Device model      : op12
-Update / build    : 10.1.100
+Update / build    : CPH2573_15.0.0.860(EX01)
 
-✔ JSON written: op12_10.1.100_ARB(0).json
+✔ JSON written: CPH2573_15.0.0.860(EX01)_ARB(0).json
 ```
 
 ---
