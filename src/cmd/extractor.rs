@@ -1800,30 +1800,34 @@ impl<'a> Extractor<'a> {
         // Cross-platform folder opening
         cfg_select! {
             target_os = "windows" => {
-                use std::process::Command;
+                use std::process::{Command, Stdio};
                 let _ = Command::new("explorer")
                     .arg(dir_path)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
             }
             target_os = "macos" => {
-                use std::process::Command;
+                use std::process::{Command, Stdio};
                 let _ = Command::new("open")
                     .arg(dir_path)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
             }
             target_os = "linux" => {
-                use std::process::Command;
+                use std::process::{Command, Stdio};
 
                 // On KDE, using xdg-open triggers a harmless but noisy Qt portal warning (related to kioclient registration).
                 // Spawning Dolphin directly avoids this, while still opening the folder correctly.
-                if Command::new("dolphin").arg(dir_path).spawn().is_ok() {
+                if Command::new("dolphin").arg(dir_path).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok() {
                     return Ok(());
                 }
 
                 // Fallback to standard xdg-open for non-KDE desktops
-                if Command::new("xdg-open").arg(dir_path).spawn().is_ok() {
+                if Command::new("xdg-open").arg(dir_path).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok() {
                     return Ok(());
                 }
 
