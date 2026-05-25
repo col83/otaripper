@@ -406,4 +406,3 @@ unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
     }
     data[i..].iter().all(|&b| b == 0)
 }
-

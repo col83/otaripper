@@ -27,7 +27,7 @@ pub fn fetch_metadata(path_str: &str) -> Option<HashMap<String, String>> {
         let mut archive = ZipArchive::new(&file).ok()?;
         return extract_metadata_from_zip(&mut archive);
     }
-    
+
     None
 }
 
@@ -42,7 +42,7 @@ fn fetch_remote(url: &str) -> Option<HashMap<String, String>> {
     let spinner = indicatif::ProgressBar::hidden();
 
     let mut reader = crate::remote::CachingHttpReader::new(client, url, &spinner).ok()?;
-    
+
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic).ok()?;
     reader.seek(std::io::SeekFrom::Start(0)).ok()?;
@@ -51,11 +51,13 @@ fn fetch_remote(url: &str) -> Option<HashMap<String, String>> {
         let mut archive = ZipArchive::new(&mut reader).ok()?;
         return extract_metadata_from_zip(&mut archive);
     }
-    
+
     None
 }
 
-fn extract_metadata_from_zip<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Option<HashMap<String, String>> {
+fn extract_metadata_from_zip<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Option<HashMap<String, String>> {
     let mut metadata = HashMap::new();
 
     // Try to read META-INF/com/android/metadata

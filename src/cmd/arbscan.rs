@@ -273,7 +273,12 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn do_run(no_json: bool, path: &Path, original_path: &Path, metadata: Option<std::collections::HashMap<String, String>>) -> Result<(), ArbError> {
+fn do_run(
+    no_json: bool,
+    path: &Path,
+    original_path: &Path,
+    metadata: Option<std::collections::HashMap<String, String>>,
+) -> Result<(), ArbError> {
     let mut file = File::open(path)?;
 
     let mut ehdr = [0u8; 64];

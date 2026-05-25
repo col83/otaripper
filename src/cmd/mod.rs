@@ -1,7 +1,7 @@
-pub mod extractor;
-pub mod simd;
 pub mod arbscan;
+pub mod extractor;
 pub mod metadata;
+pub mod simd;
 
 use crate::cmd::extractor::Extractor;
 use anyhow::Result;
