@@ -2,8 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v3.1 Note:**
-> This release introduces Parallel Chunked HTTP Streaming and massive network resilience hardening. It features multi-threaded Range requests, a dedicated bandwidth monitor, and dynamic resolver selection to ensure flawless remote extraction across Linux, Windows, and Android environments. **v3.1.2** adds smart firmware metadata extraction, dynamic folder naming, and GUI terminal silencing.
+> **v3.2.1 Note:**
+> This release introduces Parallel Chunked HTTP Streaming, massive network resilience hardening, smart firmware metadata extraction, dynamic folder naming, simplified terminal log outputs, and GUI terminal silencing.
 
 ---
 

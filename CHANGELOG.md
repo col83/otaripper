@@ -1,20 +1,22 @@
 # Changelog
 
-## **otaripper v3.2.0** (Unreleased)
+## **otaripper v3.2.1** (2026-05-26)
 
 ### Smart Firmware Metadata & UX Refinements
 
-This release significantly enhances the user experience by automatically parsing firmware metadata to enrich CLI outputs, extraction folder names, and ARB JSON exports, while also silencing notorious Linux GUI errors.
+This release significantly enhances the user experience by automatically parsing firmware metadata to enrich CLI outputs, extraction folder names, and ARB JSON exports, while also streamlining CLI logging and silencing notorious Linux GUI errors.
 
-* **Firmware Information Extraction**
-  * `otaripper` now automatically parses `META-INF/com/android/metadata` and `payload_properties.txt` from OTA zips before extraction begins.
-  * Prints a beautiful "Firmware Information" banner detailing OS Version, Security Patch, and OTA Target versions directly in the terminal.
+* **Firmware Information Banner**
+  * Automatically parses `META-INF/com/android/metadata` and `payload_properties.txt` from OTA packages before extraction begins.
+  * Prints a beautiful, clean "Firmware Information" banner detailing Product Model, Android Version, Build Version, OxygenOS/ColorOS Version, and Security Patch level.
+* **Streamlined Command Line Output**
+  * Simplified the `arb` (arbscan) subcommand output: displays only the filename being analyzed (e.g., `Analyzing: xbl_config.img`) and hides long paths or remote CDN URL parameters.
+  * Cleaned up the main firmware information display to hide redundant or confusing internal target versions and update type fields.
 * **Dynamic Output Folder Naming**
-  * The extraction output directory is now dynamically named using the actual OS version string if found (e.g., `extracted_CPH2573_15.0.0.860(EX01)_2026-05-25...`) instead of just a generic timestamp.
+  * The extraction output directory is now dynamically named using the actual OS build version string if found (e.g., `extracted_CPH2573_15.0.0.860(EX01)_2026-05-26...`) instead of just a generic timestamp.
 * **Intelligent ARB Auto-Detection**
-  * The `arb` subcommand now automatically inherits the firmware metadata parsing logic.
-  * It auto-detects the device model and OS version, securely skipping the manual user prompts and directly formatting the JSON output file (e.g., `CPH2573_15.0.0.860(EX01)_ARB(0).json`).
-  * Gracefully falls back to offering detected metadata as a default suggestion for custom ROMs missing complete version strings.
+  * The `arb` subcommand automatically inherits the firmware metadata parsing logic.
+  * It auto-detects the device model and OS version, securely skipping the manual user prompts and directly formatting the JSON output filename (e.g., `CPH2573_15.0.0.860(EX01)_ARB(0).json`).
 * **Silenced Qt Terminal Spam**
   * Explicitly redirects `stdout` and `stderr` to `/dev/null` when spawning GUI file managers (like Dolphin) post-extraction, completely silencing the notorious `QPixmap::scaled: Pixmap is a null pixmap` Linux terminal spam.
 
