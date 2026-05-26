@@ -92,7 +92,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **3.2** introduces smart metadata parsing, parallel chunked Remote HTTP Streaming, and massive I/O savings:
+Version **3.2.1** introduces smart metadata parsing, parallel chunked Remote HTTP Streaming, and massive I/O savings:
 
 * **Parallel HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, using multiple parallel 8MB chunked requests to saturate your bandwidth.
 * **Network Resilience**: Built-in automatic retries with exponential backoff and real-time offline detection. Never fail an extraction due to a temporary connection drop again.
@@ -245,7 +245,7 @@ Instantly check the ARB index of a firmware update without downloading the massi
 ```text
 $ otaripper arb https://example.com/firmware.zip
 [arbscan] OTA package detected. Extracting xbl_config.img temporarily...
-[arbscan] Analyzing: xbl_config.img (from https://example.com/firmware.zip)
+[arbscan] Analyzing: xbl_config.img
 
 OEM Metadata
 ────────────
