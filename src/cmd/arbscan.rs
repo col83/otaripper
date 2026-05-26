@@ -397,16 +397,8 @@ fn do_run(
     let minor = read_le32(&seg, oem_md_off + 4).unwrap_or(0);
     let arb = read_le32(&seg, oem_md_off + 8).unwrap_or(0);
 
-    if path == original_path {
-        println!("[arbscan] Analyzing: {}\n", original_path.display());
-    } else {
-        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-        println!(
-            "[arbscan] Analyzing: {} (from {})\n",
-            file_name,
-            original_path.display()
-        );
-    }
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    println!("[arbscan] Analyzing: {}\n", file_name);
 
     println!("OEM Metadata");
     println!("────────────");
