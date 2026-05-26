@@ -248,17 +248,39 @@ impl<'a> Extractor<'a> {
             if !self.cmd.quiet {
                 println!("Firmware Information");
                 println!("────────────────────");
-                let display_keys = [
-                    ("version_name", "OS Version"),
-                    ("oplus_rom_version", "ColorOS/OxygenOS Version"),
-                    ("ota_target_version", "OTA Target Version"),
-                    ("security_patch", "Security Patch"),
-                ];
-                for (key, label) in display_keys.iter() {
-                    if let Some(value) = meta.get(*key) {
-                        println!("{:<26} : {}", label, value);
+
+                // 1. Device Model
+                if let Some(model) = meta.get("product_name").or(meta.get("pre-device")) {
+                    println!("{:<26} : {}", "Product Model", model);
+                }
+
+                // 2. Android Version
+                if let Some(android_ver) = meta.get("android_version") {
+                    println!("{:<26} : {}", "Android Version", android_ver);
+                }
+
+                // 3. Build/OS Version
+                if let Some(build_ver) = meta.get("version_name").or(meta.get("post-build")) {
+                    println!("{:<26} : {}", "Build Version", build_ver);
+                }
+
+                // 4. ColorOS/OxygenOS Version
+                if let Some(rom_ver) = meta.get("oplus_rom_version").or(meta.get("os_version")) {
+                    // Avoid duplicating version_name if os_version happens to equal version_name
+                    if let Some(version_name) = meta.get("version_name") {
+                        if rom_ver != version_name {
+                            println!("{:<26} : {}", "OxygenOS/ColorOS Version", rom_ver);
+                        }
+                    } else {
+                        println!("{:<26} : {}", "OxygenOS/ColorOS Version", rom_ver);
                     }
                 }
+
+                // 5. Security Patch
+                if let Some(patch) = meta.get("security_patch") {
+                    println!("{:<26} : {}", "Security Patch", patch);
+                }
+
                 println!();
             }
         }
