@@ -2,8 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v3.2.1 Note:**
-> This release introduces Parallel Chunked HTTP Streaming, massive network resilience hardening, smart firmware metadata extraction, dynamic folder naming, simplified terminal log outputs, and GUI terminal silencing.
+> **v3.3.0 Note:**
+> This release introduces local and remote EDL firmware ZIP scanning, recursive directory ARB scanning, smart `version_info.txt` JSON metadata parsing, CPU SIMD detection caching via `LazyLock`, MSRV toolchain bump to `1.96.0`, and in-memory ZIP entry performance optimizations to prevent network latency.
 
 ---
 
@@ -146,7 +146,7 @@ For multi-extent writes where zero-copy streaming isn't possible, memory allocat
 
 ### Automatic CPU Detection
 
-CPU capabilities are detected once at startup and cached globally:
+CPU capabilities are detected once at startup and cached globally using a thread-safe `std::sync::LazyLock` static container.
 
 ```
 Priority Order:
@@ -156,7 +156,7 @@ Priority Order:
   Scalar  (fallback)
 ```
 
-Detection uses `is_x86_feature_detected!` and is fully runtime-safe.
+Detection uses `is_x86_feature_detected!` and is fully runtime-safe. Let-binding references resolve directly to the static container via the `Deref` trait.
 
 ---
 
@@ -287,10 +287,13 @@ Disabled only with `--no-verify`.
 
 ## Qualcomm Bootloader ARB Analysis
 
-The `arb` (or `arbscan`) subcommand performs low-level ELF structural analysis and Secure Boot integrity checks on Qualcomm Extensible Bootloader configurations (`xbl_config.img`). 
+The `arb` (or `arbscan`) subcommand performs low-level ELF structural analysis and Secure Boot integrity checks on Qualcomm Extensible Bootloader configurations (`xbl_config.img` / `xbl_config.elf`). 
 
-### 1. Zero-Download Payload Extraction
-When given a full local or remote OTA ZIP package, `otaripper` does not unpack the entire payload. Instead, it coordinates with the `Extractor` to stream only the exact block ranges of the tiny `xbl_config` partition from the remote server, performing the analysis within milliseconds.
+### 1. Zero-Download Payload & EDL ZIP Extraction
+When given a full local or remote OTA ZIP package, `otaripper` does not unpack the entire payload.
+* **OTA Packages**: Coordinates with the `Extractor` to stream only the exact block ranges of the tiny `xbl_config` partition from the remote server, performing the analysis within milliseconds.
+* **EDL ZIP Packages**: Detects the EDL layout if `payload.bin` is missing. To avoid latency, it iterates through the ZIP Central Directory in-memory using `archive.file_names()`. This prevents calling `by_index(i)` on every entry, which triggers redundant HTTP Range requests and causes remote scans to hang. It locates the best candidate (`xbl_config.img` -> `xbl_config.elf` -> `xbl.img` -> `xbl.elf`), and streams only that candidate file using a single `by_name(...)` request to a local temporary folder.
+* **Directories**: Recursively scans files in the directory to locate the highest-priority bootloader candidate directly.
 
 ### 2. ELF Header & Program Header Table Parsing
 * **Magic Validation**: The engine inspects the ELF identification bytes (`\x7fELF`) to verify a valid little-endian ELF64 layout (`ELFCLASS64`, `ELFDATA2LSB`).
@@ -315,7 +318,7 @@ It reads the little-endian fields to retrieve the target:
 
 ### 5. Smart Auto-Detection & Sanitized Export
 When writing JSON outputs, the engine pre-processes inputs to ensure strict filesystem safety:
-* **Firmware Auto-Detection**: Automatically parses `META-INF/com/android/metadata` to extract the OS version, skipping manual prompts and writing directly to `CPH2573_15.0.0.860(EX01)_ARB(N).json`.
+* **Firmware Auto-Detection**: Automatically parses `META-INF/com/android/metadata` or `version_info.txt` JSON structures to extract both the `device_model` (e.g. `product_name` / `product_model`) and `update_label` (`version_name`) simultaneously. This skips manual prompts and directly names the output JSON file (e.g., `PJZ110_PJZ110_16.0.5.701(CN01)_260303_ARB(1).json`).
 * **CDN URL Expiry Cleansing**: Strips protocol schemes and complex query string parameters (which contain illegal Windows filesystem characters like `?`, `&`, or `=`) before generating the output filename.
 * **User Input Sanitization**: Pre-cleanses spaces, slashes, and backslashes (e.g. `16.0.7.500\`) to eliminate duplicate underscores in the generated filename.
 * **ARB Level Suffixing**: Automatically appends the actual Anti-Rollback index to the final filename (as `_ARB(N).json`), making the level instantly readable on disk.
