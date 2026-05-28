@@ -126,9 +126,9 @@ impl CpuSimd {
     }
 
     pub(crate) fn get() -> Self {
-        use std::sync::OnceLock;
-        static DETECTED: OnceLock<CpuSimd> = OnceLock::new();
-        *DETECTED.get_or_init(CpuSimd::detect)
+        use std::sync::LazyLock;
+        static DETECTED: LazyLock<CpuSimd> = LazyLock::new(CpuSimd::detect);
+        *DETECTED
     }
 }
 
