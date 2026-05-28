@@ -1,11 +1,28 @@
 use std::fmt;
 use std::fs::{File, write};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cmd::Cmd;
 use crate::cmd::extractor::Extractor;
 use serde::Serialize;
+use zip::ZipArchive;
+
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
+fn find_files_in_dir(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            find_files_in_dir(&path, files)?;
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
 
 const EI_CLASS: usize = 4;
 const EI_DATA: usize = 5;
@@ -213,64 +230,254 @@ fn find_hash_header(seg: &[u8]) -> Option<usize> {
 }
 
 pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
-    let metadata = crate::cmd::metadata::fetch_metadata(path.to_str().unwrap_or(""));
+    let path_str = path.to_str().unwrap_or("");
+    let is_url = path_str.starts_with("http://") || path_str.starts_with("https://");
 
-    // Detect magic bytes
-    let mut magic = [0u8; 4];
-    if let Ok(mut f) = File::open(path) {
-        let _ = f.read_exact(&mut magic);
-    }
+    let metadata = crate::cmd::metadata::fetch_metadata(path_str);
 
-    if magic == [0x7f, b'E', b'L', b'F'] {
-        // Direct ELF image
-        return match do_run(no_json, path, path, metadata) {
+    let mut is_zip = false;
+    let mut is_elf = false;
+
+    #[cfg(feature = "remote")]
+    let mut remote_reader = None;
+
+    if is_url {
+        #[cfg(feature = "remote")]
+        {
+            println!("[arbscan] Connecting to remote server...");
+            let client = reqwest::blocking::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .pool_max_idle_per_host(32)
+                .tcp_nodelay(true)
+                .tcp_keepalive(std::time::Duration::from_secs(5))
+                .user_agent(concat!("otaripper/", env!("CARGO_PKG_VERSION")))
+                .build()?;
+            
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_style(
+                indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap(),
+            );
+            spinner.enable_steady_tick(std::time::Duration::from_millis(69));
+            
+            let mut reader = crate::remote::CachingHttpReader::new(client, path_str, &spinner)?;
+            spinner.finish_and_clear();
+
+            let mut magic = [0u8; 4];
+            reader.read_exact(&mut magic)?;
+            reader.seek(SeekFrom::Start(0))?;
+
+            if &magic == b"PK\x03\x04" {
+                is_zip = true;
+            } else if magic == [0x7f, b'E', b'L', b'F'] {
+                is_elf = true;
+            }
+            remote_reader = Some(reader);
+        }
+        #[cfg(not(feature = "remote"))]
+        {
+            anyhow::bail!("HTTP remote URL streaming is not supported in this build!");
+        }
+    } else if path.is_dir() {
+        println!("[arbscan] Directory detected. Scanning for bootloader image...");
+        let mut files = Vec::new();
+        find_files_in_dir(path, &mut files)?;
+
+        let mut candidate_path = None;
+        let mut best_priority = usize::MAX;
+
+        for p in files {
+            if let Some(filename) = p.file_name().and_then(|f| f.to_str()) {
+                let name_lower = filename.to_lowercase();
+                let priority = if name_lower == "xbl_config.img" {
+                    1
+                } else if name_lower == "xbl_config.elf" {
+                    2
+                } else if name_lower == "xbl.img" {
+                    3
+                } else if name_lower == "xbl.elf" {
+                    4
+                } else {
+                    0
+                };
+
+                if priority > 0 && priority < best_priority {
+                    best_priority = priority;
+                    candidate_path = Some(p);
+                }
+            }
+        }
+
+        let candidate_path = candidate_path.ok_or_else(|| {
+            anyhow::anyhow!("No valid bootloader candidate (xbl_config.img/elf, xbl.img/elf) found in the directory!")
+        })?;
+
+        println!("[arbscan] Found candidate: {}", candidate_path.display());
+        return match do_run(no_json, &candidate_path, path, metadata) {
             Ok(()) => Ok(()),
             Err(e) => anyhow::bail!("{}", e),
         };
-    }
-
-    // Treat as OTA payload
-    println!("[arbscan] OTA package detected. Extracting xbl_config.img temporarily...");
-    let temp_dir = tempfile::tempdir()?;
-    let cmd = Cmd {
-        subcmd: None,
-        list: false,
-        threads: None,
-        output_dir: Some(temp_dir.path().to_path_buf()),
-        partitions: vec!["xbl_config".to_string()],
-        no_verify: true,
-        strict: false,
-        print_hash: false,
-        sanity: false,
-        stats: false,
-        no_open: true,
-        positional_payload: Some(path.to_path_buf()),
-        quiet: true,
-    };
-
-    let extractor = Extractor { cmd: &cmd };
-    extractor.run()?;
-
-    let mut xbl_path = None;
-    for entry in std::fs::read_dir(temp_dir.path())? {
-        let entry = entry?;
-        let p = entry.path();
-        if p.is_dir() {
-            let candidate = p.join("xbl_config.img");
-            if candidate.exists() {
-                xbl_path = Some(candidate);
-                break;
-            }
+    } else {
+        // Local file
+        let mut magic = [0u8; 4];
+        if let Ok(mut f) = File::open(path) {
+            let _ = f.read_exact(&mut magic);
+        }
+        if magic == [0x7f, b'E', b'L', b'F'] {
+            is_elf = true;
+        } else if &magic == b"PK\x03\x04" {
+            is_zip = true;
         }
     }
 
-    let xbl_path =
-        xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
-
-    match do_run(no_json, &xbl_path, path, metadata) {
-        Ok(()) => Ok(()),
-        Err(e) => anyhow::bail!("{}", e),
+    if is_elf {
+        if is_url {
+            #[cfg(feature = "remote")]
+            {
+                if let Some(mut reader) = remote_reader {
+                    println!("[arbscan] Remote ELF image detected. Downloading to scan...");
+                    let temp_dir = tempfile::tempdir()?;
+                    let temp_file_path = temp_dir.path().join("extracted_elf.img");
+                    {
+                        let mut temp_file = File::create(&temp_file_path)?;
+                        std::io::copy(&mut reader, &mut temp_file)?;
+                    }
+                    return match do_run(no_json, &temp_file_path, path, metadata) {
+                        Ok(()) => Ok(()),
+                        Err(e) => anyhow::bail!("{}", e),
+                    };
+                }
+            }
+        } else {
+            // Direct local ELF image
+            return match do_run(no_json, path, path, metadata) {
+                Ok(()) => Ok(()),
+                Err(e) => anyhow::bail!("{}", e),
+            };
+        }
     }
+
+    if is_zip {
+        // It's a ZIP archive. Let's see what's inside.
+        let mut reader: Box<dyn ReadSeek> = if is_url {
+            #[cfg(feature = "remote")]
+            {
+                if let Some(r) = remote_reader {
+                    Box::new(r)
+                } else {
+                    anyhow::bail!("Remote reader was not initialized.");
+                }
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                anyhow::bail!("HTTP remote URL streaming is not supported in this build!");
+            }
+        } else {
+            let file = File::open(path)?;
+            Box::new(file)
+        };
+
+        let mut archive = ZipArchive::new(&mut reader)?;
+
+        // Check if it is a standard OTA payload zip by checking for payload.bin
+        let is_ota = archive.by_name("payload.bin").is_ok();
+
+        if is_ota {
+            println!("[arbscan] OTA package detected. Extracting xbl_config.img temporarily...");
+            let temp_dir = tempfile::tempdir()?;
+            let cmd = Cmd {
+                subcmd: None,
+                list: false,
+                threads: None,
+                output_dir: Some(temp_dir.path().to_path_buf()),
+                partitions: vec!["xbl_config".to_string()],
+                no_verify: true,
+                strict: false,
+                print_hash: false,
+                sanity: false,
+                stats: false,
+                no_open: true,
+                positional_payload: Some(path.to_path_buf()),
+                quiet: true,
+            };
+
+            let extractor = Extractor { cmd: &cmd };
+            extractor.run()?;
+
+            let mut xbl_path = None;
+            for entry in std::fs::read_dir(temp_dir.path())? {
+                let entry = entry?;
+                let p = entry.path();
+                if p.is_dir() {
+                    let candidate = p.join("xbl_config.img");
+                    if candidate.exists() {
+                        xbl_path = Some(candidate);
+                        break;
+                    }
+                }
+            }
+
+            let xbl_path =
+                xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
+
+            return match do_run(no_json, &xbl_path, path, metadata) {
+                Ok(()) => Ok(()),
+                Err(e) => anyhow::bail!("{}", e),
+            };
+        } else {
+            // Treat as EDL firmware or other zip firmware
+            println!("[arbscan] EDL firmware zip detected. Scanning for bootloader image...");
+            
+            // Look for candidates
+            let mut candidate_name = None;
+            let mut best_priority = usize::MAX;
+
+            for name in archive.file_names() {
+                let name_lower = name.to_lowercase();
+
+                let matches_candidate = |suffix: &str| -> bool {
+                    name_lower == suffix || name_lower.ends_with(&format!("/{}", suffix)) || name_lower.ends_with(&format!("\\{}", suffix))
+                };
+
+                let priority = if matches_candidate("xbl_config.img") {
+                    1
+                } else if matches_candidate("xbl_config.elf") {
+                    2
+                } else if matches_candidate("xbl.img") {
+                    3
+                } else if matches_candidate("xbl.elf") {
+                    4
+                } else {
+                    0
+                };
+
+                if priority > 0 && priority < best_priority {
+                    best_priority = priority;
+                    candidate_name = Some(name.to_string());
+                }
+            }
+
+            let candidate_name = candidate_name.ok_or_else(|| {
+                anyhow::anyhow!("No valid bootloader candidate (xbl_config.img/elf, xbl.img/elf) found in the zip archive!")
+            })?;
+
+            println!("[arbscan] Found candidate: {}. Extracting temporarily...", candidate_name);
+            let temp_dir = tempfile::tempdir()?;
+            let temp_file_path = temp_dir.path().join("extracted_bootloader.img");
+            
+            {
+                let mut temp_file = File::create(&temp_file_path)?;
+                let mut entry = archive.by_name(&candidate_name)?;
+                std::io::copy(&mut entry, &mut temp_file)?;
+            }
+
+            return match do_run(no_json, &temp_file_path, path, metadata) {
+                Ok(()) => Ok(()),
+                Err(e) => anyhow::bail!("{}", e),
+            };
+        }
+    }
+
+    anyhow::bail!("Unsupported file format or invalid magic bytes. Only ELF images, OTA zip files, or EDL/firmware zip packages/directories are supported.");
 }
 
 fn do_run(
@@ -415,13 +622,21 @@ fn do_run(
             if let Some(ver) = meta.get("version_name").or(meta.get("ota_target_version")) {
                 update_label = ver.clone();
                 fully_auto = true;
-            } else if let Some(dev) = meta.get("post-device").or(meta.get("pre-device")) {
+            }
+            if let Some(dev) = meta.get("post-device")
+                .or(meta.get("pre-device"))
+                .or(meta.get("product_name"))
+                .or(meta.get("product_model"))
+            {
                 device_model = dev.clone();
             }
         }
 
         if fully_auto {
             // We have a solid OS version, skip the device model prompt entirely
+            if !device_model.is_empty() {
+                println!("Device model      : {}", device_model);
+            }
             println!("Update / build    : {}", update_label);
         } else {
             // We couldn't confidently extract the version, ask the user
