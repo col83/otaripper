@@ -17,6 +17,23 @@ pub fn fetch_metadata(path_str: &str) -> Option<HashMap<String, String>> {
     }
 
     let path = Path::new(path_str);
+    if path.is_dir() {
+        let mut metadata = HashMap::new();
+        // Try to read version_info.txt
+        if let Ok(content) = std::fs::read_to_string(path.join("version_info.txt")) {
+            parse_version_info(&content, &mut metadata);
+        }
+        // Try to read META-INF/com/android/metadata
+        if let Ok(content) = std::fs::read_to_string(path.join("META-INF/com/android/metadata")) {
+            parse_properties(&content, &mut metadata);
+        }
+        // Try to read payload_properties.txt
+        if let Ok(content) = std::fs::read_to_string(path.join("payload_properties.txt")) {
+            parse_properties(&content, &mut metadata);
+        }
+        return if metadata.is_empty() { None } else { Some(metadata) };
+    }
+
     let mut file = File::open(path).ok()?;
 
     let mut magic = [0u8; 4];
@@ -60,6 +77,14 @@ fn extract_metadata_from_zip<R: Read + Seek>(
 ) -> Option<HashMap<String, String>> {
     let mut metadata = HashMap::new();
 
+    // Try to read version_info.txt (often present in EDL packages)
+    if let Ok(mut file) = archive.by_name("version_info.txt") {
+        let mut content = String::new();
+        if file.read_to_string(&mut content).is_ok() {
+            parse_version_info(&content, &mut metadata);
+        }
+    }
+
     // Try to read META-INF/com/android/metadata
     if let Ok(mut file) = archive.by_name("META-INF/com/android/metadata") {
         let mut content = String::new();
@@ -93,6 +118,26 @@ fn parse_properties(content: &str, map: &mut HashMap<String, String>) {
             let key = line[..idx].trim().to_string();
             let value = line[idx + 1..].trim().to_string();
             map.insert(key, value);
+        }
+    }
+}
+
+fn parse_version_info(content: &str, map: &mut HashMap<String, String>) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
+        let obj = if json.is_array() {
+            json.as_array().and_then(|arr| arr.first())
+        } else {
+            Some(&json)
+        };
+
+        if let Some(obj) = obj.and_then(|o| o.as_object()) {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    map.insert(k.clone(), s.to_string());
+                } else {
+                    map.insert(k.clone(), v.to_string());
+                }
+            }
         }
     }
 }
