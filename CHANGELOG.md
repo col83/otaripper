@@ -1,5 +1,31 @@
 # Changelog
 
+## **otaripper v3.3.0** (2026-05-29)
+
+### Qualcomm EDL Firmware & Directory ARB Scanning
+
+This release expands the `arb` (arbscan) subcommand to support scanning extracted directories and EDL firmware ZIP packages (which contain raw partition images like `xbl_config.img` directly, rather than a packaged `payload.bin`). It also supports zero-download remote scanning of EDL ZIP URLs, resolves network latency issues, and upgrades the MSRV toolchain requirement.
+
+* **EDL Firmware ZIP Scanning (Local & Remote)**
+  * Added auto-detection for EDL packages: if the ZIP archive doesn't contain `payload.bin` (which is standard for normal OTAs), the engine identifies it as an EDL package.
+  * Scans all archive entry names to locate the best bootloader image candidate in order of priority: `xbl_config.img`, `xbl_config.elf`, `xbl.img`, `xbl.elf`.
+  * Extracts only the selected candidate to a local temporary directory to scan it.
+* **In-Memory ZIP Entry Scanning (Network Optimization)**
+  * Transitioned the ZIP entry scanner to iterate over `archive.file_names()` completely in-memory via the loaded ZIP Central Directory.
+  * This prevents the engine from calling `by_index(i)` on every entry, which made redundant HTTP Range requests (one per file) and caused remote scans to hang.
+  * Remote EDL ZIP URL scans now execute in under 4 seconds.
+* **Directory ARB Scanning**
+  * Added recursive directory scanning. Passing a path to an unzipped EDL firmware folder will automatically find and scan the best bootloader candidate.
+* **Smart `version_info.txt` Metadata Extraction**
+  * Added parsing for `version_info.txt` JSON files inside both ZIP archives and directories.
+  * Automatically extracts `product_name`, `product_model`, and `version_name` details from the EDL firmware to auto-fill the device model and update version.
+  * Enhanced JSON output generation to dynamically write and print both `device_model` and `update_label` simultaneously if both are auto-detected.
+* **Modern Rust Toolchain & Compiler Upgrades**
+  * Upgraded MSRV (Minimum Supported Rust Version) to **Rust 1.96.0**.
+  * Replaced `std::sync::OnceLock` with `std::sync::LazyLock` for modern, thread-safe, and compile-optimized CPU feature caching.
+
+---
+
 ## **otaripper v3.2.1** (2026-05-26)
 
 ### Smart Firmware Metadata & UX Refinements
