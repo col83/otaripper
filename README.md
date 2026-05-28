@@ -64,7 +64,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-| Feature | otaripper v3.2 | payload-dumper-go | payload_dumper (Python) |
+| Feature | otaripper v3.3 | payload-dumper-go | payload_dumper (Python) |
 | :--- | :---: | :---: | :---: |
 | **Output verification** | ✅ SHA-256 | ❌ | ❌ |
 | **Remote HTTP Streaming** | ✅ (Parallel) | ❌ | ❌ |
@@ -92,7 +92,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **3.2.1** introduces smart metadata parsing, parallel chunked Remote HTTP Streaming, and massive I/O savings:
+Version **3.3.0** introduces local/remote EDL firmware and directory scanning, smart metadata parsing, parallel chunked Remote HTTP Streaming, and massive I/O savings:
 
 * **Parallel HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, using multiple parallel 8MB chunked requests to saturate your bandwidth.
 * **Network Resilience**: Built-in automatic retries with exponential backoff and real-time offline detection. Never fail an extraction due to a temporary connection drop again.
@@ -232,31 +232,36 @@ Disable automatic folder opening:
 otaripper ota.zip -n
 ```
 
-Analyze Qualcomm bootloader Anti-Rollback (ARB) metadata (accepts `.img`, `.bin`, or `.zip`):
+Analyze Qualcomm bootloader Anti-Rollback (ARB) metadata (accepts `.img`, `.bin`, `.zip` archives, or directories):
 
 ```bash
 otaripper arb update.zip
+# or directories
+otaripper arb CPH2583_EDL_Folder/
 ```
 
 🌐 **Remote ARB Inspection (Zero-Download) & Interactive Export:**
 
-Instantly check the ARB index of a firmware update without downloading the massive 3GB+ zip file! `otaripper` will intelligently stream and extract just the tiny `xbl_config.img` directly from the URL over the internet. You can optionally export the metadata into a beautifully formatted, platform-sanitized JSON file named dynamically after your device model, software build, and ARB index:
+Instantly check the ARB index of an OTA or EDL firmware update without downloading the massive 3GB+ zip file! `otaripper` will intelligently stream and extract only the tiny bootloader candidate image (e.g. `xbl_config.img` or `xbl_config.elf`) directly from the URL over the internet. You can optionally export the metadata into a beautifully formatted, platform-sanitized JSON file named dynamically after your device model, software build, and ARB index:
 
 ```text
 $ otaripper arb https://example.com/firmware.zip
-[arbscan] OTA package detected. Extracting xbl_config.img temporarily...
-[arbscan] Analyzing: xbl_config.img
+[arbscan] Connecting to remote server...
+[arbscan] EDL firmware zip detected. Scanning for bootloader image...
+[arbscan] Found candidate: RADIO/xbl_config.img. Extracting temporarily...
+[arbscan] Analyzing: extracted_bootloader.img
 
 OEM Metadata
 ────────────
   Major Version : 3
   Minor Version : 0
-  ARB Index     : 0
+  ARB Index     : 1
 
 Write JSON output? [y/N]: y
-Update / build    : CPH2573_15.0.0.860(EX01)
+Device model      : PJZ110
+Update / build    : PJZ110_16.0.5.701(CN01)_260303
 
-✔ JSON written: CPH2573_15.0.0.860(EX01)_ARB(0).json
+✔ JSON written: PJZ110_PJZ110_16.0.5.701(CN01)_260303_ARB(1).json
 ```
 
 ---
@@ -303,7 +308,7 @@ and refuses to operate on filesystem roots for safety.
 
 ### Requirements
 
-* **Rust 1.95.0 or newer** (MSRV)
+* **Rust 1.96.0 or newer** (MSRV)
 * Git
 * C compiler (gcc / clang / MSVC) - required by some native dependencies
 
@@ -425,7 +430,7 @@ Testing, bug reports, and performance feedback are welcome.
 Please include:
 
 * OS, CPU, RAM
-* otaripper version 3.1.0
+* otaripper version 3.3.0
 * OTA size and format
 * logs or error messages if available
 
