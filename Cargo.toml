@@ -34,7 +34,7 @@ mimalloc = "0.1.52"
 prost = "0.14.3"
 rayon = "1.12.0"
 ring = "0.17.14"
-sysinfo = "0.39.2"
+sysinfo = "0.39.3"
 tempfile = "3.27.0"
 liblzma = "0.4.6"
 zip = { version = "8.6.0", default-features = false, features = [
